@@ -12,6 +12,7 @@
 
 ### 修复
 
+- **画廊预览点不动（自初版起即存在）**：`#lightbox` / `#lbImg` 元素从未写入页面——CSS、`galOpen`/`galClose` 逻辑与防空调用齐全，唯独缺少 HTML 本体，点击缩略图静默无效。现已在页面中补上该元素，画廊缩略图点击可正常放大预览（点击背景关闭）。
 - **网关生图全 401 的存量 bug**：`yesnaiFetch` 使用 `{ ...(init.headers || {}) }` 展开 `RequestInit.headers`，当传入的是 `Headers` 实例（网关生成路径 `gatewayGenerate` 正是如此）时展开结果为空对象，转发给上游的请求丢失 `Authorization` 头，恒定 401。现对 `Headers` 实例做 `Object.fromEntries(entries())` 归一，网关生图链路实测恢复 200。此前该路径从未成功过。
 - `wrangler.jsonc` 校正 D1 `database_id` 为当前账号实际资源。
 
