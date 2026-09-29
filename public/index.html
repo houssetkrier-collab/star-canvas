@@ -703,6 +703,84 @@ footer{text-align:center;padding:26px 20px 34px;color:var(--ink-faint);font-size
       </div>
     </div>
 
+    <div class="sec" id="regSec" style="display:none"><h4>注册新账号 · 一键导入</h4>
+      <p class="muted">目标站点：<span id="regSite"></span>（在此站点注册 / 登录后自动新建 API Token 并导入）</p>
+      <details class="adv" id="regAdv">
+        <summary>注册新账号（在当前上游站点创建）</summary>
+        <div class="inner">
+          <div class="grid2">
+            <input type="text" id="regUser" placeholder="用户名（3-64 位字母数字._-）" autocomplete="off">
+            <input type="text" id="regEmail" placeholder="邮箱（接收验证码）" autocomplete="off">
+          </div>
+          <div class="row" id="regCodeRow" style="display:none">
+            <input type="text" id="regCode" placeholder="邮箱验证码" autocomplete="one-time-code" style="flex:1">
+            <button class="btn ghost small" id="regSendCode" type="button">发送验证码</button>
+          </div>
+          <div class="grid2">
+            <input type="password" id="regPass" placeholder="密码（至少 8 位）" autocomplete="new-password">
+            <input type="password" id="regPass2" placeholder="重复密码" autocomplete="new-password">
+          </div>
+          <div class="row">
+            <button class="btn primary small" id="regGo" type="button">🪄 注册并导入</button>
+            <span class="muted" id="regOut"></span>
+          </div>
+        </div>
+      </details>
+      <details class="adv" id="impAdv">
+        <summary>一键导入已有账号（用户名 + 密码）</summary>
+        <div class="inner">
+          <div class="grid2">
+            <input type="text" id="impUser" placeholder="上游站点用户名" autocomplete="off">
+            <input type="password" id="impPass" placeholder="上游站点密码" autocomplete="current-password">
+          </div>
+          <div class="row">
+            <button class="btn primary small" id="impGo" type="button">📥 一键导入</button>
+            <span class="muted" id="impOut"></span>
+          </div>
+          <p class="muted">导入 = 登录后自动新建 API Token 并加入账户；本地模式密码仅本次请求使用不做保存，云端模式密码加密托管（与手动添加账号一致，用于 JWT 过期自动续期）。</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="sec" id="walletSec" style="display:none"><h4>钱包 · 图包 · 签到</h4>
+      <p class="muted">目标站点：<span id="walSite"></span>（与「注册/导入」同一站点，登录一次即可查询余额、购买图包、每日签到）</p>
+      <label class="f" style="margin-bottom:10px"><span>账号（当前会话 = 站点登录；其余 = 账号池账号，Worker 用托管密码代登录）</span>
+        <select id="walAcct"></select>
+      </label>
+      <details class="adv" id="walLoginAdv">
+        <summary>登录站点（用户名或邮箱 + 密码）</summary>
+        <div class="inner">
+          <div class="row" id="walLogin">
+            <input type="text" id="walUser" placeholder="上游站点用户名或邮箱" autocomplete="off" style="flex:1;min-width:150px">
+            <input type="password" id="walPass" placeholder="上游站点密码" autocomplete="current-password" style="flex:1;min-width:150px">
+            <button class="btn primary small" id="walLoginBtn" type="button">登录站点</button>
+          </div>
+          <p class="muted">登录仅在本页面内存中生效，刷新即失效，密码不做保存。</p>
+        </div>
+      </details>
+      <details class="adv" id="walInfo" style="display:none">
+        <summary>钱包 · 余额 / 图包 / 签到</summary>
+        <div class="inner">
+          <div class="muted" style="line-height:1.9">
+            <b id="walBalance" style="font-family:var(--mono);color:var(--warn)">余额 —</b>
+            <span id="walCredits">· 图包次数 —</span><br>
+            <span id="walPackInfo">—</span><br>
+            <span id="walCheckinState">—</span>
+          </div>
+          <div class="row">
+            <button class="btn ghost small" id="walCheckinBtn" type="button">每日签到领宝石</button>
+          </div>
+          <div class="row">
+            <input type="number" id="packQty" min="1" max="10000" value="1" title="购买包数（1-10000）" style="width:92px">
+            <span class="muted" id="packCost">共 1 包 · 预计 — Gems</span>
+            <button class="btn primary small" id="packBuyBtn" type="button">🛒 一键购买图包</button>
+          </div>
+          <p class="muted" id="walHint"></p>
+          <p class="muted" id="walOut"></p>
+        </div>
+      </details>
+    </div>
+
     <div class="sec" id="tokSec" style="display:none"><h4>分发密钥 · 外部接入（OpenAI 兼容）</h4>
       <div id="tokList"></div>
       <div class="grid2" style="margin-top:12px">
@@ -782,6 +860,10 @@ footer{text-align:center;padding:26px 20px 34px;color:var(--ink-faint);font-size
         <div><label class="f"><span>工作日（周一至周五）</span></label><div id="weekdayTimes" class="time-list"></div><button class="up" id="addWeekday" type="button">＋ 添加时间</button></div>
         <div><label class="f"><span>周末（周六/周日）</span></label><div id="weekendTimes" class="time-list"></div><button class="up" id="addWeekend" type="button">＋ 添加时间</button></div>
       </div>
+      <div class="row" style="margin-top:12px">
+        <label class="switch"><input type="checkbox" id="acAutobuy"><i></i>自动购买图包</label>
+        <label class="f" style="min-width:220px"><span>图包次数低于此值时购买（1-10000）</span><input type="number" id="acAutobuyThreshold" min="1" max="10000" value="8"></label>
+      </div>
       <p class="muted" id="acStatus" style="margin-top:12px">状态读取中…</p>
       <p class="muted" style="margin-top:6px">全部启用账号共用这份时刻表，各账号独立签到与重试（每槽最多 1+4 次，间隔 30 分钟）；JWT 过期会用托管密码自动重登，Turnstile 需人工处理。</p>
     </div>
@@ -832,6 +914,8 @@ const S = {
   acct: (v => v === "auto" ? "auto" : (Number(v) || null))(localStorage.getItem(LS.acct)),   // 云端当前生图账号 id 或 "auto"
   genBusy: false, quoteBusy: false, checkinBusy: false,
   i2iImg: null, infillImg: null, infillMask: null,
+  // 站点会话（钱包/图包/签到用）：仅内存，不写 localStorage，页面刷新即失效
+  siteAuth: {jwt: null, user: null},
 };
 const $ = id => document.getElementById(id);
 const save = (k,v) => localStorage.setItem(k, v);
@@ -872,7 +956,7 @@ const CLOUD_PATH = {
   "/api/ynai/user/balance":"/api/yesnai/balance",
   "/api/user/checkin":"/api/yesnai/checkin",
 };
-async function api(path, {method="GET", body=null, auth="none", timeoutMs=45000, responseType="json"} = {}){
+async function api(path, {method="GET", body=null, auth="none", timeoutMs=45000, responseType="json", extraHeaders=null} = {}){
   const localDirect = !S.cloud && /^\/api\/prompt\//.test(path);
   const targetPath = S.cloud ? (CLOUD_PATH[path] || path) : (localDirect ? path : "/p" + path);
   const headers = {};
@@ -882,6 +966,7 @@ async function api(path, {method="GET", body=null, auth="none", timeoutMs=45000,
   if (!S.cloud && auth === "token" && S.token) headers["Authorization"] = "Bearer " + S.token;
   if (!S.cloud && auth === "jwt" && S.jwtLocal) headers["Authorization"] = "Bearer " + S.jwtLocal;
   if (body !== null) headers["Content-Type"] = "application/json";
+  if (extraHeaders) Object.assign(headers, extraHeaders);
   const ac = new AbortController();
   const timer = setTimeout(()=>ac.abort(), timeoutMs);
   let res;
@@ -900,7 +985,9 @@ async function api(path, {method="GET", body=null, auth="none", timeoutMs=45000,
   let data = null;
   try{ data = await res.json(); }catch(e){}
   if (!res.ok){
-    const m = data?.error?.message || data?.detail || data?.message || (typeof data==="string"?data:"") || ("HTTP " + res.status);
+    // FastAPI 校验错误（如 422）的 detail 是 [{msg,loc},...] 数组，拼接为可读文本
+    const dv = Array.isArray(data?.detail) ? data.detail.map(d=>d?.msg||d?.message).filter(Boolean).join("；") : data?.detail;
+    const m = data?.error?.message || dv || data?.message || (typeof data==="string"?data:"") || ("HTTP " + res.status);
     const err = new Error(m); err.status = res.status; err.data = data;
     const code = data?.error?.code;
     if (code === "ACCESS_KEY_REQUIRED") err.hint = "需要访问密钥：在设置里填写部署者提供的 APP_ACCESS_KEY";
@@ -910,6 +997,14 @@ async function api(path, {method="GET", body=null, auth="none", timeoutMs=45000,
     throw err;
   }
   return data;
+}
+// 上游站点原生接口（注册/导入、钱包/图包/签到专用）：云端经 Worker relay（/api/nai/relay），
+// 本地经 serve.py /p 代理直连；jwt 只随本次请求透传给上游，不经手存储。
+// extraHeaders 可显式带 X-Account-Id（钱包选中的池账号，Worker 用托管密码代登录）；
+// 未显式指定时云端强制置空该头，避免 api() 自动注入的生图选号头在无 auth 的注册/登录请求上误触发代登录。
+async function upstreamApi(path, {method="GET", body=null, jwt=null, extraHeaders=null} = {}){
+  if (S.cloud) return api("/api/nai/relay", {method:"POST", body:{path, method, body, auth: jwt}, timeoutMs:60000, extraHeaders:{"X-Account-Id": "", ...(extraHeaders||{})}});
+  return api(path, {method, body, timeoutMs:60000, extraHeaders: {...(jwt ? {"Authorization": "Bearer " + jwt} : {}), ...(extraHeaders||{})}});
 }
 // 需要 X-Access-Key 的裸 fetch（画廊图片等二进制）
 async function authFetch(path, timeoutMs=60000){
@@ -1753,6 +1848,7 @@ function acctRender(list){
     `<span class="st">账号<span class="num">${list.length}</span></span>` +
     `<span class="st">今日已签<span class="num">${signed}/${list.filter(a=>a.enabled).length}</span></span>` +
     (S.acct === "auto" ? `<span class="st">当前生图 → <span class="num">轮询池</span></span>` : "");
+  walAcctRender();   // 账号池变化同步到钱包面板的账号下拉
 }
 async function acctPatch(id, patch){
   try{ await api("/api/accounts/" + id, {method:"PATCH", body:patch}); toast("已更新", "ok"); acctLoad(); }
@@ -1808,9 +1904,313 @@ async function acctBulkImport(){
     toast("批量导入失败：" + e.message, "err");
   }finally{ $("acctBulkBtn").disabled = false; }
 }
+
+/* ================= 注册新账号 · 一键导入（上游站点原生接口） ================= */
+const REG = { status: null, statusBase: null, cdTimer: null };
+function regApplyStatus(){
+  const st = REG.status;
+  $("regSite").textContent = S.base;
+  const needMail = !!(st && st.email_verification);
+  $("regCodeRow").style.display = needMail ? "" : "none";
+  $("regEmail").placeholder = needMail ? "邮箱（接收验证码，必填）" : "邮箱（接收验证码）";
+  const closed = !!(st && (st.register_enabled === false || st.password_register_enabled === false));
+  $("regGo").disabled = closed;
+  $("regOut").textContent = closed ? "该站点未开放注册" : "";
+}
+async function regLoad(){
+  if (REG.status && REG.statusBase === S.base){ regApplyStatus(); return; }   // 已加载且站点未变，跳过
+  try{
+    REG.status = await upstreamApi("/api/ynai/status");
+    // 上游 ynai 接口存在顶层字段与 {data:{...}} 包装两种响应形状（仓库内新旧代码各依赖一种），顶层优先归一
+    if (REG.status && REG.status.email_verification == null && REG.status.data && typeof REG.status.data === "object") REG.status = { ...REG.status.data, ...REG.status };
+    REG.statusBase = S.base;
+  }catch(e){
+    REG.status = null;
+    $("regSite").textContent = S.base;
+    $("regOut").textContent = "站点状态获取失败：" + e.message;
+    return;
+  }
+  regApplyStatus();
+}
+async function regSendCode(){
+  const email = ($("regEmail").value || "").trim();
+  if (!email || !email.includes("@")) return toast("请先填写有效邮箱（用于接收验证码）", "warn");
+  const btn = $("regSendCode");
+  btn.disabled = true;
+  try{
+    await upstreamApi("/api/ynai/auth/verification", {method:"POST", body:{email}});
+    toast("验证码已发送", "ok");
+    let left = 60;   // 站点 60 秒重发冷却
+    btn.textContent = `剩余 ${left}s`;
+    if (REG.cdTimer) clearInterval(REG.cdTimer);
+    REG.cdTimer = setInterval(()=>{
+      left--;
+      if (left <= 0){ clearInterval(REG.cdTimer); REG.cdTimer = null; btn.disabled = false; btn.textContent = "发送验证码"; }
+      else btn.textContent = `剩余 ${left}s`;
+    }, 1000);
+  }catch(e){
+    btn.disabled = false;
+    toast("验证码发送失败：" + e.message, "err");
+  }
+}
+async function regGo(){
+  const user = ($("regUser").value || "").trim();
+  const pass = $("regPass").value || "";
+  if (!/^[A-Za-z0-9_.-]{3,64}$/.test(user)) return toast("用户名需 3-64 位，仅限字母、数字和 . _ -", "warn");
+  if (pass.length < 8) return toast("密码至少 8 位", "warn");
+  if (pass !== ($("regPass2").value || "")) return toast("两次输入的密码不一致", "warn");
+  const email = ($("regEmail").value || "").trim();
+  const code = ($("regCode").value || "").trim();
+  if (REG.status && REG.status.email_verification){
+    if (!email || !email.includes("@")) return toast("该站点开启邮箱验证，请填写有效邮箱", "warn");
+    if (!code) return toast("该站点开启邮箱验证，请填写邮箱验证码", "warn");
+  }
+  const btn = $("regGo");
+  btn.disabled = true;
+  $("regOut").textContent = "注册中…";
+  try{
+    await upstreamApi("/api/ynai/auth/register", {method:"POST", body:{
+      username: user, password: pass,
+      email: email || undefined, verification_code: code || undefined,
+    }});
+    toast("注册成功，正在自动导入…", "ok");
+    $("impUser").value = user;
+    $("impPass").value = pass;
+    await importGo();
+    $("regOut").textContent = $("impOut").textContent;
+  }catch(e){
+    $("regOut").textContent = "注册失败：" + e.message;
+    toast("注册失败：" + e.message, "err");
+  }finally{
+    btn.disabled = false;
+    $("regPass").value = ""; $("regPass2").value = ""; $("regCode").value = "";
+  }
+}
+async function importGo(){
+  const user = ($("impUser").value || "").trim();
+  const pass = $("impPass").value || "";
+  if (!user || !pass) return toast("请填写上游站点的用户名和密码", "warn");
+  const btn = $("impGo");
+  btn.disabled = true;
+  $("impOut").textContent = "登录中…";
+  try{
+    const lr = await upstreamApi("/api/ynai/auth/login", {method:"POST", body:{username: user, password: pass}});
+    const jwt = lr?.access_token ?? lr?.data?.access_token;   // 顶层优先，兼容 {data:{...}} 包装
+    if (typeof jwt !== "string" || !jwt) throw new Error("登录失败");
+    S.siteAuth = {jwt, user};   // 站点会话：钱包/图包/签到复用本次 JWT（仅内存）
+    $("impOut").textContent = "已登录，正在创建 API Token…";
+    const name = "yesnai-studio-" + new Date().toISOString().slice(0,16).replace(/[-:T]/g,"");
+    const tr = await upstreamApi("/api/ynai/tokens", {method:"POST", jwt, body:{
+      name, allowed_models: [], allow_paid_requests: true, allow_free_tier_requests: true,
+    }});
+    const token = tr?.token ?? tr?.data?.token;   // 顶层优先，兼容 {data:{...}} 包装
+    if (typeof token !== "string" || !token) throw new Error("Token 创建失败（未返回密钥）");
+    if (S.cloud){
+      // 与手动「添加并登录」同一条 /api/accounts 通道：密码加密托管，JWT 过期自动续期
+      await api("/api/accounts", {method:"POST", body:{username: user, password: pass, api_token: token}, timeoutMs:60000});
+      acctLoad();
+    }else{
+      S.token = token;
+      save(LS.token, token);
+      if ($("cfgToken")) $("cfgToken").value = token;
+    }
+    const done = `已导入：${user}（Token 名 ${name}）`;
+    $("impOut").textContent = done;
+    $("regOut").textContent = done;
+    toast("一键导入完成", "ok");
+    walLoad();   // 导入完成即建立站点会话，顺手刷新钱包/签到状态
+  }catch(e){
+    $("impOut").textContent = "导入失败：" + e.message;
+    toast("导入失败：" + e.message, "err");
+  }finally{
+    btn.disabled = false;
+    $("impPass").value = "";
+  }
+}
 function openAcctModal(){
   $("acctModal").classList.add("on");
   acctLoad();
+}
+
+/* ================= 钱包 · 图包 · 签到（站点内存会话 / 池账号代登录） ================= */
+let WAL = { packs: null, acct: null };   // packs: 最近一次 GET image-packs 快照；acct: null=当前会话，数字=账号池账号 id（均仅内存，不落盘）
+// 钱包上游调用统一鉴权头（walLoad/walCheckin/walBuy 三处共用，保证一致）：
+// 池账号 → X-Account-Id 头（Worker 用该账号托管密码现登上游代登录，body 不带 auth）；当前会话 → {}（JWT 经 body.auth 透传）
+function walJwtHeader(){
+  return WAL.acct != null ? {"X-Account-Id": String(WAL.acct)} : {};
+}
+// 与 walJwtHeader 配对：池账号模式不带会话 JWT（避免 Worker 按 body.auth 优先而忽略账号选择）；当前会话模式带站点 JWT
+function walJwt(){
+  return WAL.acct != null ? null : (S.siteAuth?.jwt || null);
+}
+// 门放宽：有站点会话或选中了池账号任一即可操作钱包（未登录也可直接用池账号）
+function walAuthed(){ return Boolean(S.siteAuth?.jwt) || WAL.acct != null; }
+// 账号下拉选项 = 当前会话（<user>）+ 账号池全部账号；选中的池账号已被删除时回退当前会话
+function walAcctRender(){
+  const sel = $("walAcct"); if (!sel) return;
+  const prev = WAL.acct;
+  const sessionLabel = S.siteAuth?.user ? `当前会话（${S.siteAuth.user}）` : "当前会话（未登录）";
+  sel.innerHTML = `<option value="session">${esc(sessionLabel)}</option>` +
+    (S.cloud ? (S.accounts || []).map(a=>`<option value="${a.id}">${esc(a.label || a.username)}</option>`).join("") : "");
+  if (prev != null && (S.accounts || []).some(a=>a.id === prev)) sel.value = String(prev);
+  else { WAL.acct = null; sel.value = "session"; }
+}
+async function siteLogin(user, pass){
+  const lr = await upstreamApi("/api/ynai/auth/login", {method:"POST", body:{username: user, password: pass}});
+  const jwt = lr?.access_token ?? lr?.data?.access_token;   // 顶层优先，兼容 {data:{...}} 包装
+  if (typeof jwt !== "string" || !jwt) throw new Error("站点未返回 access_token");
+  S.siteAuth = {jwt, user};
+  return jwt;
+}
+function walSwitch(){
+  const authed = walAuthed();
+  if ($("walLoginAdv")) $("walLoginAdv").style.display = authed ? "none" : "";
+  if ($("walInfo")) $("walInfo").style.display = authed ? "" : "none";
+}
+// 数量与余额联动：非法数量 / 余额不足时禁用购买按钮并写 #walHint
+function walPackUpdate(){
+  const packs = WAL.packs, buyBtn = $("packBuyBtn");
+  if (!packs || !buyBtn){ if (buyBtn) buyBtn.disabled = true; return; }
+  const bal = Number(packs.balance_gems ?? 0), pg = Number(packs.pack_gems ?? 0);
+  if (packs.enabled === false){
+    $("packCost").textContent = "共 — 包 · 预计 —";
+    buyBtn.disabled = true;
+    return;
+  }
+  const n = Math.floor(Number($("packQty").value));
+  const okQty = Number.isInteger(n) && n >= 1 && n <= 10000;
+  $("packCost").textContent = okQty ? `共 ${n} 包 · 预计 ${n * pg} Gems` : "数量需为 1-10000 的整数";
+  if (!okQty){ buyBtn.disabled = true; return; }
+  if (bal < pg){
+    buyBtn.disabled = true;
+    $("walHint").textContent = `余额不足：当前 ${bal} Gems，每包需 ${pg} Gems，还差 ${pg - bal}。补救：每日签到领 1-5 宝石 / 使用站点兑换码 / 联系站长发放（公益站不开放充值）`;
+    return;
+  }
+  if (n * pg > bal){
+    buyBtn.disabled = true;
+    $("walHint").textContent = `买 ${n} 包需要 ${n * pg} Gems，余额 ${bal} Gems，还差 ${n * pg - bal}。补救：每日签到领 1-5 宝石 / 使用站点兑换码 / 联系站长发放（公益站不开放充值）`;
+    return;
+  }
+  $("walHint").textContent = "";
+  buyBtn.disabled = false;
+}
+async function walLoad(){
+  const sec = $("walletSec"); if (!sec) return;
+  if ($("walSite")) $("walSite").textContent = S.base;
+  walAcctRender();
+  walSwitch();
+  if (!walAuthed()) return;   // 未登录且未选池账号：只显示登录态，不发请求
+  const [packsRes, checkinRes] = await Promise.allSettled([
+    upstreamApi("/api/ynai/image-packs", {jwt: walJwt(), extraHeaders: walJwtHeader()}),
+    upstreamApi("/api/user/checkin", {jwt: walJwt(), extraHeaders: walJwtHeader()}),
+  ]);
+  // 当前会话 JWT 过期（401）：清空站点会话回到登录态；池账号模式不动站点会话（两者相互独立）
+  if (WAL.acct == null &&
+      ((packsRes.status === "rejected" && packsRes.reason?.status === 401) ||
+       (checkinRes.status === "rejected" && checkinRes.reason?.status === 401))){
+    S.siteAuth = {jwt: null, user: null};
+    WAL.packs = null;
+    walSwitch();
+    toast("登录已过期，请重新登录", "warn");
+    return;
+  }
+  let packs = packsRes.status === "fulfilled" ? packsRes.value : null;
+  const checkinRaw = checkinRes.status === "fulfilled" ? checkinRes.value : null;
+  // 顶层优先归一：上游 ynai 接口存在 {data:{...}} 包装形状（仓库内旧代码依赖该形状）
+  if (packs && packs.balance_gems == null && packs.data && typeof packs.data === "object") packs = { ...packs.data, ...packs };
+  let checkin = checkinRaw;
+  if (checkin && checkin.today == null && checkin.data && typeof checkin.data === "object") checkin = { ...checkin.data, ...checkin };
+  WAL.packs = packs;
+  if (packs){
+    $("walBalance").textContent = `余额 ${Number(packs.balance_gems ?? 0)} Gems`;
+    $("walCredits").textContent = `· 图包次数 ${Number(packs.image_pack_credits ?? 0)}`;
+    $("walPackInfo").textContent = packs.enabled === false
+      ? "站点已关闭图包"
+      : `每包 ${packs.pack_images ?? "?"} 张 / ${packs.pack_gems ?? "?"} Gems · 免费 ${packs.free_count ?? 0} 张 / 每 ${packs.window_minutes ?? "?"} 分钟`;
+  } else {
+    $("walBalance").textContent = "余额 —";
+    $("walCredits").textContent = "· 图包次数 —";
+    $("walPackInfo").textContent = "图包信息加载失败：" + (packsRes.reason?.message || "未知错误");
+    $("walHint").textContent = "图包信息加载失败，购买已暂时禁用；可重新展开本面板或重开设置重试";
+  }
+  const ckBtn = $("walCheckinBtn");
+  const today = new Date().toISOString().slice(0, 10);   // 站点签到窗口按 UTC 日期
+  if (checkin){
+    if (checkin.enabled === false){
+      $("walCheckinState").textContent = "签到状态：站点未开启签到";
+      ckBtn.disabled = true; ckBtn.textContent = "站点未开启签到";
+    } else if (checkin.today === today){
+      $("walCheckinState").textContent = `签到状态：今日已签到（${checkin.today}）`;
+      ckBtn.disabled = true; ckBtn.textContent = "今日已签到";
+    } else {
+      $("walCheckinState").textContent = `签到状态：今日（${today}）尚未签到，可领 1-5 宝石`;
+      ckBtn.disabled = false; ckBtn.textContent = "每日签到领宝石";
+    }
+  } else {
+    $("walCheckinState").textContent = "签到状态加载失败：" + (checkinRes.reason?.message || "未知错误");
+    ckBtn.disabled = true; ckBtn.textContent = "每日签到领宝石";
+  }
+  if (packs && packs.enabled === false){
+    $("packQty").disabled = true;
+    $("packCost").textContent = "共 — 包 · 预计 —";
+    $("walHint").textContent = "站点已关闭图包";
+    $("packBuyBtn").disabled = true;
+  } else {
+    $("packQty").disabled = !packs;
+    walPackUpdate();
+  }
+}
+async function walLoginGo(){
+  const user = ($("walUser").value || "").trim();
+  const pass = $("walPass").value || "";
+  if (!user || !pass) return toast("请填写站点用户名（或邮箱）和密码", "warn");
+  const btn = $("walLoginBtn");
+  btn.disabled = true;
+  try{
+    await siteLogin(user, pass);
+    toast("站点登录成功", "ok");
+    $("walOut").textContent = `已登录：${user}`;
+    walLoad();
+  }catch(e){
+    toast("登录失败：" + e.message, "err");
+  }finally{
+    btn.disabled = false;
+    $("walPass").value = "";   // 密码用后即弃，成功失败都不留
+  }
+}
+async function walCheckin(){
+  if (!walAuthed()) return toast("请先登录站点或选择池账号", "warn");
+  const btn = $("walCheckinBtn");
+  btn.disabled = true;
+  try{
+    const r = await upstreamApi("/api/user/checkin", {method:"POST", jwt: walJwt(), extraHeaders: walJwtHeader()});
+    const n = Number(r?.quota_awarded ?? r?.data?.quota_awarded ?? 0);
+    toast(`签到成功 +${n} 宝石`, "ok");
+    $("walOut").textContent = `签到成功 +${n} 宝石`;
+  }catch(e){
+    toast("签到失败：" + e.message, "err");   // 重复签到等上游错误原文透传
+    $("walOut").textContent = "签到失败：" + e.message;
+  }finally{
+    walLoad();   // 成败都按站点最新状态重渲染（含按钮禁用态）
+  }
+}
+async function walBuy(){
+  if (!walAuthed()) return toast("请先登录站点或选择池账号", "warn");
+  const n = Math.floor(Number($("packQty").value));
+  if (!Number.isInteger(n) || n < 1 || n > 10000) return toast("购买数量需为 1-10000 的整数", "warn");
+  const btn = $("packBuyBtn");
+  btn.disabled = true;   // 点击即禁用防连点
+  try{
+    // 成功响应形状未知：不读响应体，购买后重新 GET image-packs 刷新
+    await upstreamApi("/api/ynai/image-packs/purchase", {method:"POST", jwt: walJwt(), extraHeaders: walJwtHeader(), body:{packs: n}});
+    toast(`已购买 ${n} 包`, "ok");
+    $("walOut").textContent = `已购买 ${n} 包（余额与次数已刷新）`;
+  }catch(e){
+    toast("购买失败：" + e.message, "err");   // 402 余额不足等上游错误原文透传
+    $("walOut").textContent = "购买失败：" + e.message;
+  }finally{
+    walLoad();
+  }
 }
 /* ---- 每账号签到时间编辑 ---- */
 let schedAccount = null;
@@ -1872,6 +2272,8 @@ function openSettings(tip){
   acRefresh();
   if ($("galStore")) $("galStore").textContent = S.cloud ? "云端画廊存 Cloudflare R2" : "本地画廊存浏览器 IndexedDB";
   if (S.cloud){ api("/api/session").then(cloudSession).catch(()=>{}); acctLoad(); }
+  regLoad();
+  walLoad();   // 已登录才拉钱包/签到数据；未登录只切换到登录态，不发请求
 }
 function saveSettings(){
   if (S.cloud){
@@ -1924,6 +2326,8 @@ async function acRefresh(){
     const r = await res.json();
     $("acEnabled").checked = r.enabled !== false && r.enabled !== 0;
     if ($("acZone")) $("acZone").value = r.timezone || "Asia/Shanghai";
+    if ($("acAutobuy")) $("acAutobuy").checked = !!r.autobuy_enabled;
+    if ($("acAutobuyThreshold")) $("acAutobuyThreshold").value = r.autobuy_threshold ?? 8;
     renderTimes("weekdayTimes", r.weekday_times || [r.time || "09:05"]);
     renderTimes("weekendTimes", r.weekend_times || ["10:00"]);
     const head = S.cloud ? "✓ 云端多账号时刻表" : (r.has_token ? "✓ 本地令牌已同步" : "✗ 未同步令牌（登录一次即可）");
@@ -1950,7 +2354,9 @@ function addTime(containerId){
 async function acSave(){
   try{
     const body = {enabled:$("acEnabled").checked, timezone:$("acZone").value,
-      weekday_times:readTimes("weekdayTimes"), weekend_times:readTimes("weekendTimes")};
+      weekday_times:readTimes("weekdayTimes"), weekend_times:readTimes("weekendTimes"),
+      autobuy_enabled:$("acAutobuy") ? $("acAutobuy").checked : undefined,
+      autobuy_threshold:$("acAutobuyThreshold") ? Number($("acAutobuyThreshold").value) : undefined};
     const res = await fetch(S.cloud ? "/api/autocheckin/settings" : "/reg",
       {method:S.cloud ? "PATCH" : "POST", headers:acHeaders(), credentials:"include", body:JSON.stringify(body)});
     if (!res.ok){
@@ -2817,13 +3223,19 @@ function tfWrite(){$("prompt").value=tfSerialize(TF.data);persistForm();$("tagFl
 function tfUndo(){if(TF.history.length<2)return;TF.future.push(TF.history.pop());TF.data=tfParse(TF.history.at(-1));tfRender();}
 function tfRedo(){const x=TF.future.pop();if(!x)return;TF.history.push(x);TF.data=tfParse(x);tfRender();}
 function modeUI(){
-  const cs = $("cloudSec"), ls = $("localSec"), as = $("acctSec"), ts = $("tokSec"), gs = $("gatewaySec"), ps = $("promptApiSec"), sel = $("acctSel");
+  const cs = $("cloudSec"), ls = $("localSec"), as = $("acctSec"), ts = $("tokSec"), gs = $("gatewaySec"), ps = $("promptApiSec"), rs = $("regSec"), sel = $("acctSel");
   if (cs) cs.style.display = S.cloud ? "" : "none";
   if (ls) ls.style.display = S.cloud ? "none" : "";
   if (as) as.style.display = S.cloud ? "" : "none";
   if (ts) ts.style.display = S.cloud ? "" : "none";
   if (gs) gs.style.display = S.cloud ? "" : "none";
   if (ps) ps.style.display = "";
+  if (rs){
+    rs.style.display = "";   // 注册/导入：本地与云端模式均显示
+    if ($("impGo")) $("impGo").textContent = S.cloud ? "📥 一键导入（加入账户集合）" : "📥 一键导入（加入本地账号）";
+  }
+  const ws = $("walletSec");
+  if (ws) ws.style.display = "";   // 钱包/图包/签到：本地与云端模式均显示
   if (!S.cloud && sel) sel.style.display = "none";
   loginUI();
 }
@@ -2910,6 +3322,14 @@ document.addEventListener("DOMContentLoaded", async ()=>{
 
   $("acEnabled").onchange = acSave;
   $("acZone").onchange = acSave;
+  if ($("acAutobuy")) $("acAutobuy").onchange = acSave;
+  if ($("acAutobuyThreshold")) $("acAutobuyThreshold").onchange = acSave;
+  if ($("walAcct")) $("walAcct").onchange = ()=>{
+    const v = $("walAcct").value;
+    WAL.acct = v === "session" ? null : (Number(v) || null);
+    walSwitch();
+    walLoad();   // 切换账号立即刷新（当前会话未登录时只切换显示，不发请求）
+  };
   $("addWeekday").onclick = ()=>addTime("weekdayTimes");
   $("addWeekend").onclick = ()=>addTime("weekendTimes");
   $("acTest").onclick = acTest;
@@ -2963,6 +3383,17 @@ document.addEventListener("DOMContentLoaded", async ()=>{
   if ($("gatewayCancel")) $("gatewayCancel").onclick = gatewayReset;
   $("acctBulkBtn").onclick = acctBulkImport;
   $("acctAdd").onclick = acctAdd;
+  if ($("regSendCode")) $("regSendCode").onclick = regSendCode;
+  if ($("regGo")) $("regGo").onclick = regGo;
+  if ($("impGo")) $("impGo").onclick = importGo;
+  if ($("regAdv")) $("regAdv").ontoggle = ()=>{ if ($("regAdv").open) regLoad(); };
+  if ($("impAdv")) $("impAdv").ontoggle = ()=>{ if ($("impAdv").open) regLoad(); };
+  if ($("walLoginBtn")) $("walLoginBtn").onclick = walLoginGo;
+  if ($("walCheckinBtn")) $("walCheckinBtn").onclick = walCheckin;
+  if ($("packBuyBtn")) $("packBuyBtn").onclick = walBuy;
+  if ($("packQty")) $("packQty").oninput = walPackUpdate;
+  if ($("walLoginAdv")) $("walLoginAdv").ontoggle = ()=>{ if ($("walLoginAdv").open) walLoad(); };
+  if ($("walInfo")) $("walInfo").ontoggle = ()=>{ if ($("walInfo").open) walLoad(); };
   $("acctRefresh").onclick = acctRefreshGems;
   $("galMore").onclick = galLoadMore;
   $("galClear").onclick = galClearAll;

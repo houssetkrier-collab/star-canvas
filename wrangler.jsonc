@@ -12,7 +12,8 @@
     {
       "binding": "DB",
       "database_name": "yesnai-studio",
-      "database_id": "fc4bf789-6aee-4fdf-985e-5c85230be4d6",
+      // 主 Cloudflare 账号自建库
+      "database_id": "9a313cca-5c61-409f-b8b5-a502acc1cbc3",
       "migrations_dir": "migrations"
     }
   ],

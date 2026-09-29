@@ -68,7 +68,9 @@ function validTimezone(tz: string) {
 }
 function upstreamBase(env: Env) { return (env.YESNAI_BASE || "https://nai.rinko.ai").replace(/\/$/, ""); }
 async function yesnaiFetch(env: Env, path: string, init: RequestInit = {}, timeoutMs = UPSTREAM_TIMEOUT_MS) {
-  return fetch(upstreamBase(env) + path, { ...init, signal: AbortSignal.timeout(timeoutMs), headers: { Accept: "application/json", ...(init.headers || {}) } });
+  // Headers 实例没有可枚举的自有属性，对象展开会得到空对象导致 Authorization 丢失（网关 401 根因），先归一为普通对象
+  const extra = init.headers instanceof Headers ? Object.fromEntries(init.headers.entries()) : (init.headers || {});
+  return fetch(upstreamBase(env) + path, { ...init, signal: AbortSignal.timeout(timeoutMs), headers: { Accept: "application/json", ...extra } });
 }
 async function upstreamJson(response: Response) {
   const text = await response.text();
@@ -208,9 +210,10 @@ async function resolveAccount(env: Env, request: Request): Promise<AccountRow> {
 async function upstreamLogin(env: Env, username: string, password: string) {
   const resp = await yesnaiFetch(env, "/api/ynai/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
   const { data } = await upstreamJson(resp);
-  const jwt = data?.data?.access_token;
+  // 上游登录响应存在两种形状：{access_token} 或 {message,data:{access_token}}（线上实测为后者），读法两者兼容
+  const jwt = data?.data?.access_token ?? data?.access_token;
   if (!resp.ok || !jwt) throw new HttpError(sanitizedMessage(data, `登录失败（HTTP ${resp.status}）`), resp.ok ? 400 : resp.status === 401 ? 401 : 502, "LOGIN_FAILED");
-  return { jwt: String(jwt), uid: data?.data?.uid };
+  return { jwt: String(jwt), uid: data?.data?.uid ?? data?.uid };
 }
 async function accountJwt(env: Env, acc: AccountRow): Promise<string> {
   const jwt = await unseal(env, acc.jwt_enc);
@@ -273,6 +276,11 @@ function uniqueTimes(input: unknown, fallback: string[]) {
 function parseTimesArray(raw: unknown): unknown {
   try { return JSON.parse(String(raw || "[]")); } catch { return []; }
 }
+// 自动购买图包阈值：1-10000 的整数，非法/缺省回落 8（迁移 0011 默认值）
+function clampAutobuyThreshold(v: unknown): number {
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n >= 1 ? Math.min(10000, n) : 8;
+}
 function parseConfig(row: any) {
   // 存量库可能存进非法时区（老版本未校验），这里兜底防止 cron 整体崩死
   const tz = row?.timezone && validTimezone(row.timezone) ? row.timezone : DEFAULT_ZONE;
@@ -281,6 +289,8 @@ function parseConfig(row: any) {
     timezone: tz,
     weekday_times: uniqueTimes(parseTimesArray(row?.weekday_times), DEFAULT_WEEKDAY),
     weekend_times: uniqueTimes(parseTimesArray(row?.weekend_times), DEFAULT_WEEKEND),
+    autobuy_enabled: Number(row?.autobuy_enabled || 0) !== 0,
+    autobuy_threshold: clampAutobuyThreshold(row?.autobuy_threshold),
   };
 }
 async function getConfig(env: Env) {
@@ -291,17 +301,26 @@ async function saveConfig(env: Env, patch: any) {
   const current = await getConfig(env);
   const timezone = typeof patch.timezone === "string" && patch.timezone ? patch.timezone : current.timezone;
   if (!validTimezone(timezone)) throw new HttpError("时区无效（需 IANA 名称，如 Asia/Shanghai）", 400, "BAD_TIMEZONE");
+  let autobuyThreshold = current.autobuy_threshold;
+  if (patch.autobuy_threshold !== undefined) {
+    const raw = Number(patch.autobuy_threshold), n = Math.floor(raw);
+    if (!Number.isFinite(raw) || raw !== n || n < 1 || n > 10000)
+      throw new HttpError("图包购买阈值需为 1-10000 的整数", 400, "BAD_AUTOBUY_THRESHOLD");
+    autobuyThreshold = n;
+  }
   const config = {
     enabled: patch.enabled === undefined ? current.enabled : Boolean(patch.enabled),
     timezone,
     weekday_times: uniqueTimes(patch.weekday_times, current.weekday_times),
     weekend_times: uniqueTimes(patch.weekend_times, current.weekend_times),
+    autobuy_enabled: patch.autobuy_enabled === undefined ? current.autobuy_enabled : Boolean(patch.autobuy_enabled),
+    autobuy_threshold: autobuyThreshold,
   };
   if (!config.weekday_times.length && !config.weekend_times.length) throw new HttpError("至少保留一个签到时间", 400, "SCHEDULE_EMPTY");
   const now = nowIso();
-  await env.DB.prepare(`INSERT INTO autocheckin_config(id,enabled,timezone,weekday_times,weekend_times,next_run_at,updated_at)
-    VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,timezone=excluded.timezone,weekday_times=excluded.weekday_times,weekend_times=excluded.weekend_times,updated_at=excluded.updated_at`)
-    .bind(config.enabled ? 1 : 0, config.timezone, JSON.stringify(config.weekday_times), JSON.stringify(config.weekend_times), now, now).run();
+  await env.DB.prepare(`INSERT INTO autocheckin_config(id,enabled,timezone,weekday_times,weekend_times,autobuy_enabled,autobuy_threshold,next_run_at,updated_at)
+    VALUES(1,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,timezone=excluded.timezone,weekday_times=excluded.weekday_times,weekend_times=excluded.weekend_times,autobuy_enabled=excluded.autobuy_enabled,autobuy_threshold=excluded.autobuy_threshold,updated_at=excluded.updated_at`)
+    .bind(config.enabled ? 1 : 0, config.timezone, JSON.stringify(config.weekday_times), JSON.stringify(config.weekend_times), config.autobuy_enabled ? 1 : 0, config.autobuy_threshold, now, now).run();
   return getConfig(env);
 }
 function localParts(date: Date, timeZone: string) {
@@ -381,6 +400,43 @@ async function performCheckin(env: Env, acc: AccountRow, slot: string | null, op
   await env.DB.prepare("INSERT INTO autocheckin_logs(account_id,attempted_at,slot,ok,status_code,message) VALUES(?,?,?,?,?,?)").bind(acc.id, nowIso(), actualSlot, response.ok ? 1 : 0, response.status, logMsg).run();
   return { ok: response.ok, message, status, slot: actualSlot, account: accountPublic(acc).label };
 }
+
+// 上游 ynai 业务响应存在两种形状：对象本体或 {message,data:{...}} 包一层，读法统一解包（仅图包购买流程使用）
+function unwrapEnvelope(data: any) {
+  return data && typeof data === "object" && data.data && typeof data.data === "object" && !Array.isArray(data.data) ? data.data : data;
+}
+// 签到完成后按需自动购买图包（默认关闭，迁移 0011）：图包次数低于阈值且余额够 1 包时买 1 包。
+// 结果（买了/没买原因/失败原因）写一条 autocheckin_logs（slot='autobuy'）；异常上抛由调用方兜底，绝不影响签到主流程。
+async function autoBuyPacks(env: Env, acc: AccountRow) {
+  const config = await getConfig(env);
+  const threshold = clampAutobuyThreshold(config.autobuy_threshold);
+  const label = accountPublic(acc).label;
+  const log = (ok: boolean, statusCode: number, message: string) =>
+    env.DB.prepare("INSERT INTO autocheckin_logs(account_id,attempted_at,slot,ok,status_code,message) VALUES(?,?,?,?,?,?)")
+      .bind(acc.id, nowIso(), "autobuy", ok ? 1 : 0, statusCode, `[${label}] ${message}`.slice(0, 300)).run();
+  // 重新读账号行：签到流程可能刚用托管密码重登并刷新过 JWT，取落库后的最新值
+  const fresh = (await getAccount(env, acc.id)) || acc;
+  const jwt = await accountJwt(env, fresh);
+  const info = await upstreamJson(await yesnaiFetch(env, "/api/ynai/image-packs", { headers: { Authorization: `Bearer ${jwt}` } }));
+  const pack = unwrapEnvelope(info.data);
+  const credits = Number(pack?.image_pack_credits), gems = Number(pack?.balance_gems), packGems = Number(pack?.pack_gems);
+  if (!info.response.ok || !Number.isFinite(credits) || !Number.isFinite(packGems)) {
+    await log(false, info.response.status, `查询图包状态失败（HTTP ${info.response.status}）`);
+    return;
+  }
+  if (pack?.enabled === false) { await log(true, info.response.status, `站点已关闭图包，未购买`); return; }
+  if (credits >= threshold) { await log(true, info.response.status, `图包次数 ${credits} 未低于阈值 ${threshold}，未购买`); return; }
+  if (!Number.isFinite(gems) || gems < packGems) {
+    await log(true, info.response.status, `图包次数 ${credits} 低于阈值 ${threshold}，但余额不足（${Number.isFinite(gems) ? gems : "未知"} Gems < 每包 ${packGems} Gems），未购买`);
+    return;
+  }
+  const buy = await upstreamJson(await yesnaiFetch(env, "/api/ynai/image-packs/purchase", {
+    method: "POST", headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" }, body: JSON.stringify({ packs: 1 }),
+  }));
+  if (buy.response.ok) await log(true, buy.response.status, `图包次数 ${credits} 低于阈值 ${threshold}，已自动购买 1 个图包（每包 ${packGems} Gems）`);
+  else await log(false, buy.response.status, `自动购买图包失败（HTTP ${buy.response.status}）：${sanitizedMessage(buy.data, "上游错误")}`);
+}
+
 async function claimLease(env: Env) {
   const lease = new Date(Date.now() + 10 * 60 * 1000).toISOString();
   const r = await env.DB.prepare("UPDATE autocheckin_config SET lease_until=?,updated_at=? WHERE id=1 AND (lease_until IS NULL OR lease_until<?)").bind(lease, nowIso(), nowIso()).run();
@@ -407,6 +463,11 @@ async function runScheduled(env: Env) {
       const retryable = acc.status === "retry" && acc.retry_count < RETRY_MAX && backoffOk;
       if (!fresh && !retryable) continue;
       await performCheckin(env, acc, slot);
+      if (config.autobuy_enabled) {
+        // 授权挂接点：签到完成（成功或失败）后按开关自动购买图包；任何异常只记日志，不中断签到主流程
+        try { await autoBuyPacks(env, acc); }
+        catch (e) { console.error("[autobuy]", accountPublic(acc).label, e); }
+      }
     } catch (e) {
       // 单账号故障不拖垮整批；终态错误（过期/人机验证）不再无意义重试
       if (acc.status !== "jwt_expired" && acc.status !== "manual_required") {
@@ -434,6 +495,47 @@ async function yesnaiRoute(request: Request, env: Env, route: string) {
   // 图片工具代理：复用账号选择，透传上游二进制及表示头。
   if (route.startsWith("ai/")) return imageToolRoute(request, env, route.slice(3));
   throw new HttpError("未知 YesNAI 路由", 404, "ROUTE_NOT_FOUND");
+}
+
+// 上游 ynai 中转：前端「注册/一键导入」「钱包/图包/签到」经此访问上游 /api/ynai/* 业务 API；JWT 仅本次请求内存透传，不落盘不打日志。
+async function upstreamRelay(request: Request, env: Env) {
+  if (Number(request.headers.get("Content-Length") || 0) > 65536) throw new HttpError("relay 请求体过大", 413, "RELAY_BODY_TOO_LARGE");
+  const payload = await readJson<any>(request);
+  const path = payload?.path;
+  // 白名单目的：中转通道只开放给上游业务 API，防止被当作任意目标代理；先做 URL 规范化，防 ../ 与百分号编码绕过。
+  const u = new URL(path, upstreamBase(env) + "/");
+  const clean = u.pathname + u.search;
+  // /api/user/checkin（每日签到）不属于 /api/ynai/ 前缀，按规范化后 pathname 精确匹配放行（允许携带 query，如未来 ?month=）
+  if (!clean.startsWith("/api/ynai/") && u.pathname !== "/api/user/checkin") throw new HttpError("仅允许中转 /api/ynai/ 路径与 /api/user/checkin", 403, "RELAY_PATH_DENIED");
+  if (!["GET", "POST", "PUT", "DELETE"].includes(payload?.method)) throw new HttpError("不支持的转发方法", 400, "RELAY_METHOD_DENIED");
+  const method = payload.method;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const auth = payload?.auth;
+  if (typeof auth === "string" && auth) {
+    headers.Authorization = "Bearer " + auth.replace(/^Bearer\s+/i, "");
+  } else {
+    // 钱包多账号：无 body.auth 时支持 X-Account-Id 头——按池账号解密托管的用户名密码现登上游（不缓存）后转发。
+    // 找不到账号或缺托管密码直接拒绝；上游登录失败（含 401）由 upstreamLogin 按上游状态码抛出透传。
+    const accountId = Number(String(request.headers.get("X-Account-Id") || "").trim());
+    if (accountId) {
+      const acc = await getAccount(env, accountId);
+      const password = acc ? await unseal(env, acc.password_enc) : "";
+      if (!acc || !password) throw new HttpError("该账号缺少用户名密码，无法代登录", 400, "ACCOUNT_CREDENTIALS_MISSING");
+      const { jwt } = await upstreamLogin(env, acc.username, password);
+      headers.Authorization = "Bearer " + jwt;
+    }
+  }
+  const init: RequestInit = { method, headers };
+  if (method !== "GET" && payload?.body != null) {
+    const serialized = JSON.stringify(payload.body);
+    if (serialized.length > 65536) throw new HttpError("relay 请求体过大", 413, "RELAY_BODY_TOO_LARGE");
+    init.body = serialized;
+  }
+  let resp: Response;
+  try { resp = await yesnaiFetch(env, clean, init, 30000); }
+  catch (e: any) { throw new HttpError("上游站点不可达：" + sanitizedMessage(e, String(e)), 502, "UPSTREAM_UNAVAILABLE"); }
+  const text = await resp.text();
+  return new Response(text, { status: resp.status, headers: { "Content-Type": resp.headers.get("Content-Type") || "application/json; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
 async function imageToolRoute(request: Request, env: Env, route: string) {
@@ -1350,6 +1452,7 @@ export default {
         else if (path.startsWith("/api/gateway/keys")) response = await gatewayKeysRoute(request, env, path.slice("/api/gateway/keys".length));
         else if (path.startsWith("/api/tokens")) response = await tokensRoute(request, env, path.slice("/api/tokens".length));
         else if (path.startsWith("/api/gallery")) response = await galleryRoute(request, env, path.slice("/api/gallery".length));
+        else if (path === "/api/nai/relay" && request.method === "POST") { requireOrigin(request, env); response = await upstreamRelay(request, env); }
         else if (path.startsWith("/api/yesnai/")) response = await yesnaiRoute(request, env, path.slice("/api/yesnai/".length));
         else response = error("API 路由不存在", 404, "ROUTE_NOT_FOUND");
       }
