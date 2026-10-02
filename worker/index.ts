@@ -167,8 +167,13 @@ interface AccountRow {
   enabled: number; gems_last: number | null;
   last_attempt_slot: string | null; last_attempt_at: string | null; last_success_slot: string | null;
   status: string; last_message: string | null; retry_count: number;
+  attempt_slots: string[]; success_slots: string[];             // 当天已尝试/已成功的槽集合（DB 存 JSON 字符串，读出归一为数组）
   weekday_times: string | null; weekend_times: string | null;   // NULL = 跟随全局时刻表
   created_at: string; updated_at: string;
+}
+function parseSlotList(v: unknown): string[] { try { const a = JSON.parse(String(v ?? "[]")); return Array.isArray(a) ? a.filter((x): x is string => typeof x === "string") : []; } catch { return []; } }
+function normalizeAccount<T extends AccountRow>(row: T): T {
+  return { ...row, attempt_slots: parseSlotList((row as any).attempt_slots), success_slots: parseSlotList((row as any).success_slots) };
 }
 function accountPublic(a: AccountRow) {
   return {
@@ -181,7 +186,7 @@ function accountPublic(a: AccountRow) {
 }
 async function listAccounts(env: Env): Promise<AccountRow[]> {
   const { results } = await env.DB.prepare("SELECT * FROM accounts ORDER BY id").all<AccountRow>();
-  return results || [];
+  return (results || []).map(normalizeAccount);
 }
 // 首次运行：把 Worker Secret 里的单账号引导成 accounts 表的第一行，之后统一走表
 async function ensureBootstrapped(env: Env) {
@@ -194,7 +199,8 @@ async function ensureBootstrapped(env: Env) {
       "", env.YESNAI_API_TOKEN ? await seal(env, env.YESNAI_API_TOKEN) : "", now, now).run();
 }
 async function getAccount(env: Env, id: number): Promise<AccountRow | null> {
-  return env.DB.prepare("SELECT * FROM accounts WHERE id=?").bind(id).first<AccountRow>();
+  const row = await env.DB.prepare("SELECT * FROM accounts WHERE id=?").bind(id).first<AccountRow>();
+  return row ? normalizeAccount(row) : null;
 }
 // 轮询候选序列：启用且有生图 Token 的账号按 id 稳定排序，D1 原子自增游标取模定起点，
 // 从起点旋转后返回——首个即本次轮到的账号，其余作为失败转移顺序。
@@ -252,7 +258,7 @@ async function refreshJwt(env: Env, acc: AccountRow): Promise<string | null> {
 async function updateAccount(env: Env, id: number, patch: Record<string, unknown>) {
   const sets: string[] = []; const vals: unknown[] = [];
   for (const k of ["label", "jwt_enc", "password_enc", "api_token_enc"]) if (patch[k] !== undefined) { sets.push(`${k}=?`); vals.push(patch[k]); }
-  for (const k of ["enabled", "gems_last", "last_attempt_slot", "last_attempt_at", "last_success_slot", "status", "last_message", "retry_count", "weekday_times", "weekend_times"]) if (patch[k] !== undefined) { sets.push(`${k}=?`); vals.push(patch[k]); }
+  for (const k of ["enabled", "gems_last", "last_attempt_slot", "last_attempt_at", "last_success_slot", "status", "last_message", "retry_count", "weekday_times", "weekend_times", "attempt_slots", "success_slots"]) if (patch[k] !== undefined) { sets.push(`${k}=?`); vals.push(patch[k]); }
   if (!sets.length) return;
   sets.push("updated_at=?"); vals.push(nowIso()); vals.push(id);
   await env.DB.prepare(`UPDATE accounts SET ${sets.join(",")} WHERE id=?`).bind(...vals).run();
@@ -351,14 +357,16 @@ function localParts(date: Date, timeZone: string) {
 }
 function slotKey(p: ReturnType<typeof localParts>, time: string) { return `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}T${time}`; }
 function slotMinutes(t: string) { return Number(t.slice(0, 2)) * 60 + Number(t.slice(3)); }
-function dueSlot(times: string[], attempted: { last_attempt_slot: string | null; last_success_slot: string | null }, date = new Date(), timezone = DEFAULT_ZONE) {
+function dueSlot(times: string[], acc: Pick<AccountRow, "attempt_slots" | "success_slots">, date = new Date(), timezone = DEFAULT_ZONE) {
   const p = localParts(date, timezone);
   const dayTimes = ["Sat", "Sun"].includes(p.weekday) ? times : times; // times 已按工作日/周末选好
   const current = p.hour * 60 + p.minute;
   const due = [...dayTimes].sort().filter(t => current >= slotMinutes(t)); // 升序
   if (!due.length) return null;
   // 补签：优先今天最早一个还没尝试过的槽（覆盖 cron 停机跨槽的情况）；全部试过则落到最新槽进入重试
-  const unattempted = due.find(t => { const k = slotKey(p, t); return k !== attempted.last_attempt_slot && k !== attempted.last_success_slot; });
+  // 槽状态按「当天集合」记录而非单值，避免多时间槽互相顶掉对方的已签记录导致整晚重复签到
+  const tried = new Set([...(acc.attempt_slots || []), ...(acc.success_slots || [])]);
+  const unattempted = due.find(t => !tried.has(slotKey(p, t)));
   return slotKey(p, unattempted || due[due.length - 1]);
 }
 function todayTimes(config: ReturnType<typeof parseConfig>, date = new Date()) {
@@ -407,15 +415,22 @@ async function performCheckin(env: Env, acc: AccountRow, slot: string | null, op
   const next = response.ok || status !== "retry" ? nextSlot(config) : new Date(Date.now() + RETRY_BACKOFF_MS).toISOString();
   const isNewSlot = acc.last_attempt_slot !== actualSlot;
   const logMsg = `[${accountPublic(acc).label}] ${message}`;
+  // 当天槽集合：每次尝试入 attempted，成功追加 success；按天剪枝防膨胀
+  const dayPrefix = actualSlot.split("T")[0] + "T";
+  const attemptedSlots = [...new Set([...(acc.attempt_slots || []), actualSlot])].filter(k => k.startsWith(dayPrefix));
+  const successSlots = response.ok
+    ? [...new Set([...(acc.success_slots || []), actualSlot])].filter(k => k.startsWith(dayPrefix))
+    : (acc.success_slots || []).filter(k => k.startsWith(dayPrefix));
   if (opts.manual) {
     // 手动测试：成功才推进签到状态；失败只置 retry 供 cron 接手，不动重试计数
-    if (response.ok) await updateAccount(env, acc.id, { last_attempt_slot: actualSlot, last_success_slot: actualSlot, status: "success", last_message: message, retry_count: 0 });
-    else await updateAccount(env, acc.id, { last_attempt_slot: actualSlot, status: "retry", last_message: message });
+    if (response.ok) await updateAccount(env, acc.id, { last_attempt_slot: actualSlot, last_success_slot: actualSlot, status: "success", last_message: message, retry_count: 0, attempt_slots: JSON.stringify(attemptedSlots), success_slots: JSON.stringify(successSlots) });
+    else await updateAccount(env, acc.id, { last_attempt_slot: actualSlot, status: "retry", last_message: message, attempt_slots: JSON.stringify(attemptedSlots), success_slots: JSON.stringify(successSlots) });
   } else {
     // 换槽时重试计数归零，保证「每槽最多 1+4 次尝试」
     await updateAccount(env, acc.id, {
       last_attempt_slot: actualSlot, last_success_slot: response.ok ? actualSlot : null, status, last_message: message,
       retry_count: response.ok ? 0 : (isNewSlot ? 1 : acc.retry_count + 1),
+      attempt_slots: JSON.stringify(attemptedSlots), success_slots: JSON.stringify(successSlots),
     });
   }
   await env.DB.prepare("INSERT INTO autocheckin_logs(account_id,attempted_at,slot,ok,status_code,message) VALUES(?,?,?,?,?,?)").bind(acc.id, nowIso(), actualSlot, response.ok ? 1 : 0, response.status, logMsg).run();
@@ -470,32 +485,37 @@ async function runScheduled(env: Env) {
   const accounts = (await listAccounts(env)).filter(a => a.enabled);
   if (!accounts.length) return;
   if (!(await claimLease(env))) return;
-  // 错峰：账号顺序随机打散，每个账号之间 3~8 秒随机间隔，避免整批瞬时连发
-  const order = accounts.slice().sort(() => Math.random() - 0.5);
-  for (let i = 0; i < order.length; i++) {
-    const acc = order[i];
-    if (i > 0) await new Promise(r => setTimeout(r, 3000 + Math.random() * 5000));
-    try {
-      const slot = dueSlot(effectiveDayTimes(config, acc), acc);   // 每账号按自己的时刻表取槽
-      if (!slot) continue;
-      const fresh = acc.last_attempt_slot !== slot;
-      const lastAttempt = acc.last_attempt_at ? Date.parse(acc.last_attempt_at) : 0;
-      const backoffOk = !lastAttempt || Date.now() - lastAttempt >= RETRY_BACKOFF_MS;
-      const retryable = acc.status === "retry" && acc.retry_count < RETRY_MAX && backoffOk;
-      if (!fresh && !retryable) continue;
-      await performCheckin(env, acc, slot);
-      if (config.autobuy_enabled) {
-        // 授权挂接点：签到完成（成功或失败）后按开关自动购买图包；任何异常只记日志，不中断签到主流程
-        try { await autoBuyPacks(env, acc); }
-        catch (e) { console.error("[autobuy]", accountPublic(acc).label, e); }
+  try {
+    // 错峰：账号顺序随机打散，每个账号之间 3~8 秒随机间隔，避免整批瞬时连发
+    const order = accounts.slice().sort(() => Math.random() - 0.5);
+    for (let i = 0; i < order.length; i++) {
+      const acc = order[i];
+      if (i > 0) await new Promise(r => setTimeout(r, 3000 + Math.random() * 5000));
+      try {
+        const slot = dueSlot(effectiveDayTimes(config, acc), acc);   // 每账号按自己的时刻表取槽
+        if (!slot) continue;
+        const fresh = !(acc.attempt_slots || []).includes(slot);      // 按当天集合判断，多槽互不误判
+        const lastAttempt = acc.last_attempt_at ? Date.parse(acc.last_attempt_at) : 0;
+        const backoffOk = !lastAttempt || Date.now() - lastAttempt >= RETRY_BACKOFF_MS;
+        const retryable = acc.status === "retry" && acc.retry_count < RETRY_MAX && backoffOk;
+        if (!fresh && !retryable) continue;
+        await performCheckin(env, acc, slot);
+        if (config.autobuy_enabled) {
+          // 授权挂接点：签到完成（成功或失败）后按开关自动购买图包；任何异常只记日志，不中断签到主流程
+          try { await autoBuyPacks(env, acc); }
+          catch (e) { console.error("[autobuy]", accountPublic(acc).label, e); }
+        }
+      } catch (e) {
+        // 单账号故障不拖垮整批；终态错误（过期/人机验证）不再无意义重试
+        if (acc.status !== "jwt_expired" && acc.status !== "manual_required") {
+          await updateAccount(env, acc.id, { status: "retry", last_message: String(e).slice(0, 300), retry_count: acc.retry_count + 1 }).catch(() => {});
+        }
+        console.error("[scheduled]", accountPublic(acc).label, e);
       }
-    } catch (e) {
-      // 单账号故障不拖垮整批；终态错误（过期/人机验证）不再无意义重试
-      if (acc.status !== "jwt_expired" && acc.status !== "manual_required") {
-        await updateAccount(env, acc.id, { status: "retry", last_message: String(e).slice(0, 300), retry_count: acc.retry_count + 1 }).catch(() => {});
-      }
-      console.error("[scheduled]", accountPublic(acc).label, e);
     }
+  } finally {
+    // 跑完（含异常）立即释放租约，下一轮 cron 与手动「立即测试」不再白等 10 分钟；10 分钟过期保留作崩溃兜底
+    await env.DB.prepare("UPDATE autocheckin_config SET lease_until=NULL WHERE id=1").run().catch(() => {});
   }
 }
 
@@ -622,6 +642,8 @@ async function accountsRoute(request: Request, env: Env, rest: string) {
     const username = String(body?.username || "").trim();
     const password = String(body?.password || "");
     if (!username || !password) throw new HttpError("用户名和密码必填", 400, "ACCOUNT_FIELDS_REQUIRED");
+    const dup = await env.DB.prepare("SELECT id FROM accounts WHERE username=?").bind(username).first<any>();
+    if (dup) throw new HttpError("该账号已在账号池中，无需重复添加", 409, "ACCOUNT_EXISTS");
     const { jwt } = await upstreamLogin(env, username, password);
     const now = nowIso();
     const r = await env.DB.prepare(`INSERT INTO accounts(label,username,jwt_enc,password_enc,api_token_enc,enabled,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?)`)
@@ -642,6 +664,7 @@ async function accountsRoute(request: Request, env: Env, rest: string) {
     const now = nowIso();
     for (const it of items) {
       try {
+        if (await env.DB.prepare("SELECT id FROM accounts WHERE username=?").bind(it.username).first<any>()) { results.push({ username: it.username, ok: false, message: "该账号已在账号池中" }); continue; }
         const { jwt } = await upstreamLogin(env, it.username, it.password);
         const r = await env.DB.prepare(`INSERT INTO accounts(label,username,jwt_enc,password_enc,api_token_enc,enabled,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?)`)
           .bind(it.username.slice(0, 40), it.username, await seal(env, jwt), await seal(env, it.password), "", now, now).run();
@@ -853,11 +876,13 @@ async function publicGalleryRoute(request: Request, env: Env, rest: string) {
     const u = new URL(request.url), limit = Math.min(Math.max(Number(u.searchParams.get("limit")) || 24, 1), GALLERY_PAGE_MAX), offset = Math.max(Number(u.searchParams.get("offset")) || 0, 0);
     const search = String(u.searchParams.get("search") || "").trim().slice(0, 100), rating = String(u.searchParams.get("rating") || "").trim().toLowerCase(), sort = String(u.searchParams.get("sort") || "new").trim().toLowerCase();
     const where = ["public=1"]; const binds: any[] = [];
-    if (search) { where.push("(title LIKE ? OR tags LIKE ? OR prompt LIKE ?)"); const s = `%${search}%`; binds.push(s, s, s); }
+    // 未公开提示词不参与搜索匹配，防止用词典逐词试探推断内容
+    if (search) { where.push("(title LIKE ? OR tags LIKE ? OR (prompt_disclosed=1 AND prompt LIKE ?))"); const s = `%${search}%`; binds.push(s, s, s); }
     if (["general", "r15", "r17"].includes(rating)) { where.push("rating=?"); binds.push(rating); }
     const order = sort === "likes" ? "like_count DESC, published_at DESC" : "published_at DESC, ts DESC";
     const rows = await env.DB.prepare(`SELECT id,ts,fmt,thumb_fmt,title,tags,rating,public,published_at,prompt_disclosed,params_disclosed,view_count,like_count,model,w,h,steps,scale,sampler,noise FROM gallery WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT ? OFFSET ?`).bind(...binds, limit, offset).all<any>();
-    const items = rows.results || [];
+    // params_disclosed=0 的作品不在列表外露生成参数（与详情接口守卫对齐）
+    const items = (rows.results || []).map((x: any) => { if (x.params_disclosed) return x; const { steps, scale, sampler, noise, ...rest } = x; return rest; });
     if (visitor && items.length) { const ids = items.map(x => x.id); for (const item of items) item.liked = Boolean((await env.DB.prepare("SELECT 1 FROM gallery_likes WHERE visitor_id=? AND gallery_id=?").bind(visitor, item.id).first())); }
     const total = await env.DB.prepare(`SELECT COUNT(*) c FROM gallery WHERE ${where.join(" AND ")}`).bind(...binds).first<any>();
     return json({ items, total: Number(total?.c || 0) });
@@ -1058,23 +1083,24 @@ function requireExternalKey(request: Request, env: Env) {
     throw new HttpError("统一密钥无效", 401, "ACCESS_KEY_REQUIRED");
   }
 }
-// 生图端点鉴权：yst- 分发密钥（api_tokens 表，可停用/删除）或 APP_ACCESS_KEY 管理员直通
-async function resolveExternalAuth(request: Request, env: Env): Promise<"admin" | number> {
+// 生图端点鉴权：yst- 分发密钥统一走 resolveGatewayKey（gateway_keys → api_tokens 兼容 → admin 回退），
+// 新网关密钥与旧 api_tokens 密钥在全部外部接口上行为一致，use_count 每请求只 +1。
+async function resolveExternalAuth(request: Request, env: Env): Promise<"admin" | GatewayKeyRow> {
   const auth = request.headers.get("Authorization") || "";
-  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (bearer.startsWith("yst-")) {
-    let row: any = null;
-    try { row = await env.DB.prepare("SELECT id, enabled FROM api_tokens WHERE key=?").bind(bearer).first<any>(); }
-    catch { throw new HttpError("分发密钥功能未初始化（请应用最新数据库迁移并重新部署）", 500, "TOKEN_TABLE_MISSING"); }
-    if (row?.enabled) {
-      await env.DB.prepare("UPDATE api_tokens SET use_count=use_count+1, last_used_at=? WHERE id=?").bind(nowIso(), row.id).run();
-      return row.id;
-    }
-    throw new HttpError("分发密钥无效或已停用", 401, "TOKEN_INVALID");
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  if (bearer.startsWith("yst-")) return resolveGatewayKey(request, env);
+  requireExternalKey(request, env);
+  return "admin";
+}
+// 受限密钥调用 chat/generate 直链时与 gatewayGenerate 同规：先校验策略，再合并钉死参数
+function applyGatewayPolicyToBody(row: GatewayKeyRow, naiBody: any) {
+  checkGatewayPolicy(row, naiBody);
+  const fixed = gatewayPolicy(row).fixed_parameters;
+  if (fixed && typeof fixed === "object" && !Array.isArray(fixed)) {
+    const parameters = naiBody?.parameters && typeof naiBody.parameters === "object" && !Array.isArray(naiBody.parameters)
+      ? naiBody.parameters : (naiBody.parameters = {});
+    Object.assign(parameters, structuredClone(fixed));
   }
-  if (!env.APP_ACCESS_KEY) throw new HttpError("外部 API 需要先设置 APP_ACCESS_KEY", 401, "ACCESS_KEY_REQUIRED");
-  if (bearer === env.APP_ACCESS_KEY || request.headers.get("X-Access-Key") === env.APP_ACCESS_KEY) return "admin";
-  throw new HttpError("统一密钥无效", 401, "ACCESS_KEY_REQUIRED");
 }
 async function requireGatewayOrExternalAuth(request: Request, env: Env) {
   const auth = request.headers.get("Authorization") || "";
@@ -1378,8 +1404,10 @@ function queryToNai(url: URL) {
 async function externalGenerateDirect(request: Request, env: Env, url: URL) {
   const token = url.searchParams.get("token");
   const authRequest = token ? new Request(request, { headers: new Headers({ ...Object.fromEntries(request.headers), Authorization: `Bearer ${token}` }) }) : request;
-  await resolveExternalAuth(authRequest, env);
-  const { resp, account } = await generateViaPool(env, queryToNai(url));
+  const keyRow = await resolveExternalAuth(authRequest, env);
+  const naiBody = queryToNai(url);
+  if (keyRow !== "admin") applyGatewayPolicyToBody(keyRow, naiBody);
+  const { resp, account } = await generateViaPool(env, naiBody);
   if (!resp.ok) return forward(resp);
   const { data } = await upstreamJson(resp);
   const first = Array.isArray(data?.images) ? data.images[0] : null;
@@ -1388,12 +1416,14 @@ async function externalGenerateDirect(request: Request, env: Env, url: URL) {
   return new Response(decodeImageB64(first), { headers: h });
 }
 async function externalChatGenerate(request: Request, env: Env) {
+  const keyRow = await resolveExternalAuth(request, env);   // 鉴权移入处理函数：单次解析、单次计数
   const body = await readJson<any>(request);
   const prompt = promptFromChat(body);
   if (!prompt) throw new HttpError("messages 中没有可用提示词", 400, "PROMPT_REQUIRED");
   const input = /[㐀-鿿]/.test(prompt) ? await convertChinesePrompt(env, prompt) : prompt;
   const size = SIZE_ALIAS[String(body?.size || "")] || String(body?.size || "832x1216");
   const nai = openaiToNai({ model: body?.model, prompt: input, size, n: body?.n, parameters: body?.parameters });
+  if (keyRow !== "admin") applyGatewayPolicyToBody(keyRow, nai);
   const { resp, account } = await generateViaPool(env, nai);
   if (!resp.ok) return forward(resp);
   const { data } = await upstreamJson(resp);
@@ -1445,7 +1475,7 @@ export default {
         if (path === "/api/stats" && request.method === "GET") response = await statsRoute(request, env, "stats");
         else if (path === "/api/logs" && request.method === "GET") response = await statsRoute(request, env, "logs");
         else if (path.startsWith("/api/ai/") && request.method !== "DELETE") response = await imageToolRoute(request, env, path.slice("/api/ai/".length));
-        else if (path === "/api/prompt/status" && request.method === "GET") response = json(promptApiStatus(env));
+        else if (path === "/api/prompt/status" && request.method === "GET") response = json(await promptApiStatus(env));
         else if (path === "/api/prompt/config" && request.method === "GET") { const c = await getPromptApiConfig(env); response = json({ base: c.base, model: c.model, configured: Boolean(c.base && c.key && c.model), key_configured: Boolean(c.key) }); }
         else if (path === "/api/prompt/config" && request.method === "PUT") { requireOrigin(request, env); response = json(await savePromptApiConfig(env, await readJson<any>(request))); }
         else if (path === "/api/prompt/models" && request.method === "POST") { requireOrigin(request, env); response = json({ models: await promptApiModels(env) }); }
@@ -1483,7 +1513,7 @@ export default {
       // 统一密钥外部网关：NAI 兼容路径（供脚本 / 支持自定义 base URL 的工具直接调用）
       // Nai2API 兼容：GET 直链直接返回 PNG；token 可放 query，也可用 Authorization Header
       else if (path === "/generate" && request.method === "GET") response = await externalGenerateDirect(request, env, url);
-      else if (path === "/v1/chat/completions" && request.method === "POST") { await resolveExternalAuth(request, env); response = await externalChatGenerate(request, env); }
+      else if (path === "/v1/chat/completions" && request.method === "POST") { response = await externalChatGenerate(request, env); }
       else if (path === "/v1/models" && request.method === "GET") {
         await requireGatewayOrExternalAuth(request, env);
         const resp = await yesnaiFetch(env, "/v1/models");
@@ -1493,7 +1523,8 @@ export default {
       }
       else if (path === "/v1/nai/generate-image" && request.method === "POST") { response = await gatewayGenerate(request, env, "/v1/nai/generate-image"); }
       // OpenAI 兼容生图端点：Gateway Key 或管理员访问密钥，body {model,prompt,size,n,parameters?}
-      else if (path === "/v1/images/generations" && request.method === "POST") { await requireGatewayOrExternalAuth(request, env); response = await gatewayGenerate(request, env, "/v1/images/generations"); }
+      // 鉴权与 use_count 计数都在 gatewayGenerate 内部一次完成（此前路由层重复解析导致每请求 +2）
+      else if (path === "/v1/images/generations" && request.method === "POST") { response = await gatewayGenerate(request, env, "/v1/images/generations"); }
       else if (path === "/v1/balance" && request.method === "GET") {
         requireExternalKey(request, env);
         await ensureBootstrapped(env);

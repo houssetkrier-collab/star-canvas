@@ -3,3 +3,6 @@ __pycache__/
 .playwright-cli/
 .wrangler/
 node_modules/
+# 本地状态文件含登录令牌 / API Key，绝不入库
+autocheckin.json
+prompt_api.json

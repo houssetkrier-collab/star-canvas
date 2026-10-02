@@ -75,14 +75,14 @@ npx wrangler d1 migrations apply yesnai-studio --remote
 
 ## 统一密钥外部网关（多账号 = 一个密钥）
 
-Worker 对外提供 NAI 兼容接口，凭 **APP_ACCESS_KEY** 一个密钥当"一个 NAI 账号"用；内部自动在账号池选余额最高者，401/402/429/5xx 自动换下一个候选（最多 3 个），实际服务账号写在响应头 `X-Ynai-Account`：
+Worker 对外提供 NAI 兼容接口，凭 **APP_ACCESS_KEY**（或 `yst-` 分发密钥）一个密钥当"一个 NAI 账号"用；内部在账号池 round-robin 轮询分摊额度，401/402/429/5xx 自动换下一个候选（遍历全池），实际服务账号写在响应头 `X-YesNAI-Account`：
 
 ```bash
 BASE="https://<你的worker>.workers.dev"
 KEY="<APP_ACCESS_KEY>"
 
-# 模型列表（公开）
-curl $BASE/v1/models
+# 模型列表（需 Gateway/访问密钥）
+curl -H "Authorization: Bearer $KEY" $BASE/v1/models
 
 # 生图（body 与 nai.rinko.ai /v1/nai/generate-image 完全一致）
 curl -X POST $BASE/v1/nai/generate-image \

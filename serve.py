@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -180,6 +181,7 @@ DEFAULT_STATE = {
     "weekday_times": ["09:05"], "weekend_times": ["10:00"],
     "base": DEFAULT_SITE, "token": "",
     "last_attempt_slot": "", "last_success_slot": "", "last_attempt_at": "",
+    "attempt_slots": [], "success_slots": [],   # 当天已尝试/已成功的槽集合（与 Worker 语义对齐）
     "status": "pending", "retry_count": 0, "last_msg": "尚未运行",
     "log": [],
 }
@@ -263,9 +265,11 @@ def due_slot(d: dt.datetime, st: dict):
     if not due:
         return None
     day = d.strftime("%Y-%m-%dT")
+    # 槽状态按「当天集合」记录而非单值，避免多时间槽互相顶掉对方的已签记录导致整晚重复签到
+    tried = set(st.get("attempt_slots") or []) | set(st.get("success_slots") or [])
     for t in due:
         k = day + t
-        if k != st.get("last_attempt_slot") and k != st.get("last_success_slot"):
+        if k not in tried:
             return k
     return day + due[-1]
 
@@ -324,6 +328,11 @@ def attempt(st: dict, slot=None, manual=False) -> dict:
     st["last_attempt_slot"] = slot
     if ok:
         st["last_success_slot"] = slot
+    # 当天槽集合：每次尝试入 attempted，成功追加 success；按天剪枝防膨胀
+    day_prefix = (slot.split("T")[0] + "T") if "T" in slot else dt.datetime.now().strftime("%Y-%m-%dT")
+    st["attempt_slots"] = sorted({k for k in (st.get("attempt_slots") or []) if k.startswith(day_prefix)} | {slot})
+    if ok:
+        st["success_slots"] = sorted({k for k in (st.get("success_slots") or []) if k.startswith(day_prefix)} | {slot})
     if manual:
         st["status"] = "success" if ok else "retry"
         st["retry_count"] = 0 if ok else st.get("retry_count", 0)
@@ -346,7 +355,7 @@ def scheduler_loop():
                 if st.get("enabled", True):
                     slot = due_slot(now_local(st), st)
                     if slot:
-                        fresh = st.get("last_attempt_slot") != slot
+                        fresh = slot not in (st.get("attempt_slots") or [])   # 按当天集合判断，多槽互不误判
                         gap_ok = True
                         if st.get("last_attempt_at"):
                             try:
@@ -373,13 +382,37 @@ def allowed(target: str, allow_hosts: list) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "YesNAIStudio/1.2"
+    server_version = "StarCanvas/1.2"
     allow_hosts: list = []
     default_site: str = DEFAULT_SITE
     protocol_version = "HTTP/1.1"
 
+    def _same_origin_ok(self) -> bool:
+        """本机服务只接受本机 Host；浏览器跨站请求必带 Origin，与 Host 不符一律拒。
+        挡两类攻击：恶意网页 CSRF（含免预检的 text/plain JSON）与 DNS rebinding（Host 伪装）。"""
+        host = (self.headers.get("Host") or "").split(":")[0].strip().lower()
+        if host not in ("127.0.0.1", "localhost"):
+            return False
+        origin = self.headers.get("Origin")
+        if origin:
+            try:
+                ohost = urllib.parse.urlsplit(origin).hostname or ""
+            except Exception:
+                return False
+            if ohost.lower() != host:
+                return False
+        return True
+
+    def _reject_origin(self):
+        self._send(403, "application/json; charset=utf-8",
+                   json.dumps({"error": {"message": "跨站请求被拒绝（本地服务仅接受 127.0.0.1/localhost 来源）",
+                                         "code": "ORIGIN_REJECTED"}}, ensure_ascii=False).encode())
+
     # ---------- 静态 ----------
     def do_GET(self):
+        if not self._same_origin_ok():
+            self._reject_origin()
+            return
         if self.path == "/api/session":
             # 本地服务不是云端 Worker；避免前端把本地模式误判成云端模式。
             self._send(200, "application/json; charset=utf-8", json.dumps({"local": True, "accounts": 0, "access_key_required": False}).encode())
@@ -418,6 +451,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 代理 / 本地管理 ----------
     def do_POST(self):
+        if not self._same_origin_ok():
+            self._reject_origin()
+            return
         if self.path == "/api/prompt/artist-optimize":
             payload = json_body(self)
             try:
@@ -494,6 +530,15 @@ class Handler(BaseHTTPRequestHandler):
                     st["weekend_times"] = clean_times(payload["weekend_times"], st["weekend_times"])
                 for k in ("base", "token"):
                     if k in payload:
+                        # base 白名单：签到地址只允许默认上游站，防止被改成攻击者服务器后带走 JWT
+                        if k == "base":
+                            b = str(payload.get("base") or "").rstrip("/")
+                            if b and b != DEFAULT_SITE.rstrip("/"):
+                                self._send(400, "application/json; charset=utf-8",
+                                           json.dumps({"error": {"message": f"base 仅允许默认上游站点 {DEFAULT_SITE}",
+                                                                 "code": "BASE_NOT_ALLOWED"}},
+                                                      ensure_ascii=False).encode())
+                                return
                         st[k] = payload[k]
                 test = None
                 if payload.get("action") == "test":
@@ -510,6 +555,9 @@ class Handler(BaseHTTPRequestHandler):
             self._proxy()
 
     def do_PUT(self):
+        if not self._same_origin_ok():
+            self._reject_origin()
+            return
         if self.path == "/api/prompt/config":
             length = int(self.headers.get("Content-Length") or 0)
             try:
@@ -530,6 +578,9 @@ class Handler(BaseHTTPRequestHandler):
         self._proxy()
 
     def do_DELETE(self):
+        if not self._same_origin_ok():
+            self._reject_origin()
+            return
         self._proxy()
 
     def _proxy(self):
