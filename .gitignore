@@ -3,6 +3,12 @@ __pycache__/
 .playwright-cli/
 .wrangler/
 node_modules/
-# 本地状态文件含登录令牌 / API Key，绝不入库
+.dev.vars
+# serve.py 本地运行产生的凭据文件（含登录令牌 / Prompt API Key），绝不提交
 autocheckin.json
+autocheckin.json.bak
 prompt_api.json
+
+# 一键部署脚本生成的本机文件（含访问密钥、数据库备份），绝不提交
+.deploy/
+wrangler.deploy.jsonc
