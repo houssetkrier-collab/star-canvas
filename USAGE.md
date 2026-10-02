@@ -169,6 +169,9 @@ python serve.py
 * `public/`：前端 + `_headers`（静态资源安全头）。
 
 ### 2. 部署命令
+
+> 推荐直接用一键部署：Windows 双击 `deploy.bat`，macOS / Linux 运行 `./deploy.sh`（详见 README「一键部署到 Cloudflare」）。以下为手动方式。
+
 ```bash
 npx wrangler d1 create yesnai-studio      # database_id 填入 wrangler.jsonc
 npx wrangler r2 bucket create yesnai-gallery
