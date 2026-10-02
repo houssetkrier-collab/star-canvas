@@ -45,6 +45,11 @@ STATE_LOCK = threading.Lock()
 RETRY_GAP_S = 30 * 60
 RETRY_MAX = 4
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8", ".json": "application/json; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+    ".png": "image/png", ".ico": "image/x-icon", ".svg": "image/svg+xml", ".webp": "image/webp",
+}
 
 def load_prompt_config():
     try:
@@ -72,7 +77,8 @@ def prompt_api_request(config, path, payload=None, timeout=60, overrides=None):
     base = prompt_base(config.get("base"))
     key = str(config.get("key") or "").strip()
     model = str(config.get("model") or "").strip()
-    if not base or not key or not model:
+    # 读取模型列表时还没选模型：只要求地址和 Key（原来要求三项齐全，首次配置时「读取模型」必然失败）
+    if not base or not key or (path != "/models" and not model):
         return None, "本地未配置中文提示词 API"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(base + "/v1" + path, data=data, method="POST" if payload is not None else "GET", headers={"Accept":"application/json", "Authorization":"Bearer " + key, **({"Content-Type":"application/json"} if data else {})})
@@ -260,11 +266,14 @@ def times_for(d: dt.datetime, st: dict):
 
 
 def due_slot(d: dt.datetime, st: dict):
-    """升序补签：优先今天最早一个未尝试的槽；全部试过则落到最新槽进入重试。"""
+    """站点签到一天只成功一次：今天已有成功槽 → None；否则取最早一个还没尝试过的已到点槽，都试过则取最新槽进入重试。"""
     due = [t for t in sorted(times_for(d, st)) if d.strftime("%H:%M") >= t]
     if not due:
         return None
     day = d.strftime("%Y-%m-%dT")
+    # 站点签到每天只能成功一次：今天任一槽已成功就不再发请求
+    if any(str(k).startswith(day) for k in (st.get("success_slots") or [])):
+        return None
     # 槽状态按「当天集合」记录而非单值，避免多时间槽互相顶掉对方的已签记录导致整晚重复签到
     tried = set(st.get("attempt_slots") or []) | set(st.get("success_slots") or [])
     for t in due:
@@ -278,6 +287,9 @@ def due_slot(d: dt.datetime, st: dict):
 def do_checkin(st: dict):
     """用保存的 JWT 调站点签到。返回 (ok, msg, status_code)。"""
     base = (st.get("base") or DEFAULT_SITE).rstrip("/")
+    if not allowed(base, ALLOW_HOSTS):
+        # 绝不把登录令牌发往白名单以外的站点
+        return False, f"签到站点不在白名单内：{base}", 0
     tok = st.get("token") or ""
     if not tok:
         return False, "没有登录令牌——打开绘图台登录一次即可自动同步", 0
@@ -313,8 +325,10 @@ def attempt(st: dict, slot=None, manual=False) -> dict:
     """执行一次签到并落状态。调用方需持有 STATE_LOCK。"""
     if slot is None:
         slot = due_slot(now_local(st), st)
+        if slot is None and manual:
+            slot = now_local(st).strftime("%Y-%m-%dT%H:%M")   # 手动测试：无到点槽也按当前时刻执行一次
         if slot is None:
-            return {"ok": False, "skipped": True, "msg": "当前没有到点的签到时间"}
+            return {"ok": False, "skipped": True, "msg": "今天已签到，或还没到签到时间"}
     ok, msg, code = do_checkin(st)
     is_new_slot = st.get("last_attempt_slot") != slot
     if code == 401:
@@ -374,6 +388,9 @@ def scheduler_loop():
         time.sleep(300)
 
 
+ALLOW_HOSTS = ["nai.rinko.ai", "*.rinko.ai"]
+
+
 def allowed(target: str, allow_hosts: list) -> bool:
     if not target.startswith("https://"):
         return False
@@ -417,14 +434,7 @@ class Handler(BaseHTTPRequestHandler):
             # 本地服务不是云端 Worker；避免前端把本地模式误判成云端模式。
             self._send(200, "application/json; charset=utf-8", json.dumps({"local": True, "accounts": 0, "access_key_required": False}).encode())
             return
-        if self.path == "/danbooru-tags.json":
-            body = (ROOT / "public" / "danbooru-tags.json").read_bytes()
-            self._send(200, "application/json; charset=utf-8", body)
-            return
-        if self.path == "/artist-library.json":
-            body = (ROOT / "public" / "artist-library.json").read_bytes()
-            self._send(200, "application/json; charset=utf-8", body)
-        elif self.path == "/api/prompt/config":
+        if self.path == "/api/prompt/config":
             config = load_prompt_config()
             result = {"base": prompt_base(config.get("base")), "model": config.get("model", ""), "configured": bool(config.get("base") and config.get("key") and config.get("model")), "key_configured": bool(config.get("key"))}
             self._send(200, "application/json; charset=utf-8", json.dumps(result, ensure_ascii=False).encode())
@@ -443,11 +453,23 @@ class Handler(BaseHTTPRequestHandler):
                        json.dumps(pub, ensure_ascii=False).encode())
         elif self.path.startswith("/p/"):
             self._proxy()
-        elif self.path == "/" or self.path.startswith("/?"):
-            body = (ROOT / "public" / "index.html").read_bytes()
-            self._send(200, "text/html; charset=utf-8", body)
         else:
-            self._send(404, "text/plain; charset=utf-8", "404".encode())
+            self._static()
+
+    def _static(self):
+        """public/ 下的静态文件（index.html、square.html、词库 JSON、图标），禁止越出 public 目录。"""
+        rel = self.path.split("?", 1)[0].split("#", 1)[0]
+        rel = "index.html" if rel in ("", "/") else rel.lstrip("/")
+        pub = (ROOT / "public").resolve()
+        try:
+            target = (pub / rel).resolve()
+            target.relative_to(pub)
+        except Exception:
+            return self._send(404, "text/plain; charset=utf-8", b"404")
+        if not target.is_file() or target.name.startswith("_"):
+            return self._send(404, "text/plain; charset=utf-8", b"404")
+        ctype = STATIC_TYPES.get(target.suffix.lower(), "application/octet-stream")
+        self._send(200, ctype, target.read_bytes())
 
     # ---------- 代理 / 本地管理 ----------
     def do_POST(self):
@@ -530,15 +552,17 @@ class Handler(BaseHTTPRequestHandler):
                     st["weekend_times"] = clean_times(payload["weekend_times"], st["weekend_times"])
                 for k in ("base", "token"):
                     if k in payload:
-                        # base 白名单：签到地址只允许默认上游站，防止被改成攻击者服务器后带走 JWT
+                        # base 白名单：签到地址只允许代理白名单内的站点（默认 *.rinko.ai，外加 --allow-host），
+                        # 防止被改成攻击者服务器后带走 JWT；用 --site 指定其他上游时也能正常同步令牌
                         if k == "base":
                             b = str(payload.get("base") or "").rstrip("/")
-                            if b and b != DEFAULT_SITE.rstrip("/"):
+                            if b and not allowed(b, ALLOW_HOSTS):
                                 self._send(400, "application/json; charset=utf-8",
-                                           json.dumps({"error": {"message": f"base 仅允许默认上游站点 {DEFAULT_SITE}",
+                                           json.dumps({"error": {"message": f"base 不在代理白名单内：{b}",
                                                                  "code": "BASE_NOT_ALLOWED"}},
                                                       ensure_ascii=False).encode())
                                 return
+                            payload["base"] = b
                         st[k] = payload[k]
                 test = None
                 if payload.get("action") == "test":
@@ -654,7 +678,8 @@ def main():
           f"{' · 时区 ' + st['timezone'] if st.get('timezone') else ''} · "
           f"令牌：{'已保存' if st.get('token') else '未同步（登录后自动同步）'}")
 
-    Handler.allow_hosts = ["nai.rinko.ai", "*.rinko.ai"] + args.allow_host
+    ALLOW_HOSTS.extend(h.lower() for h in args.allow_host)
+    Handler.allow_hosts = ALLOW_HOSTS
     Handler.default_site = args.site
 
     try:
