@@ -380,7 +380,7 @@ footer{text-align:center;padding:26px 20px 34px;color:var(--ink-faint);font-size
   <div class="chip" id="checkinBtn">📅 签到</div>
   <div class="chip" id="acctChip" title="打开账户集合总览" style="display:none">👥 账户 <b id="acctChipN">0</b></div>
   <select id="acctSel" title="生图 / 余额 / 签到使用的账号（自动=在所有启用账号间轮询）" style="display:none"></select>
-  <div class="chip" id="statsBtn">▣ 用量</div><div class="chip" id="imageToolsBtn">▧ 图片工具箱</div><div class="chip" id="setBtn">⚙ 设置</div>
+  <a class="chip" id="squareLink" href="/square.html" target="_blank" rel="noopener" title="公开作品广场" style="text-decoration:none;color:inherit">◈ 广场</a><div class="chip" id="statsBtn">▣ 用量</div><div class="chip" id="imageToolsBtn">▧ 图片工具箱</div><div class="chip" id="setBtn">⚙ 设置</div>
 </header>
 
 <main>
@@ -475,7 +475,7 @@ footer{text-align:center;padding:26px 20px 34px;color:var(--ink-faint);font-size
           <input type="number" id="seed" placeholder="随机" min="0" max="4294967295" disabled></label>
       </div>
 
-      <details class="adv" style="margin-top:14px">
+      <details class="adv" id="advBox" style="margin-top:14px">
         <summary>高级 · 图生图 / 局部重绘 / 附加参数</summary>
         <div class="inner">
           <label class="switch"><input type="checkbox" id="v4struct" checked><i></i>发送 v4/v5 结构化提示词（v4 以上模型建议开启）</label>
@@ -843,7 +843,7 @@ footer{text-align:center;padding:26px 20px 34px;color:var(--ink-faint);font-size
       </div>
     </div>
 
-    <div class="sec"><h4>自动签到（云端 Cron · 每 5 分钟检查）</h4>
+    <div class="sec" id="autoSec"><h4>自动签到（云端 Cron · 每 5 分钟检查）</h4>
       <div class="row" style="margin-bottom:10px">
         <label class="switch"><input type="checkbox" id="acEnabled" checked><i></i>启用自动签到</label>
         <button class="btn ghost small" id="acTest">立即测试</button>
@@ -868,7 +868,7 @@ footer{text-align:center;padding:26px 20px 34px;color:var(--ink-faint);font-size
       <p class="muted" style="margin-top:6px">全部启用账号共用这份时刻表，各账号独立签到与重试（每槽最多 1+4 次，间隔 30 分钟）；JWT 过期会用托管密码自动重登，Turnstile 需人工处理。</p>
     </div>
 
-    <div class="sec"><h4>画廊</h4>
+    <div class="sec" id="gallerySec"><h4>画廊</h4>
       <label class="switch" style="margin-bottom:10px"><input type="checkbox" id="galAuto" checked><i></i>生成成功后自动存入画廊</label>
       <div class="row">
         <button class="btn ghost small" id="galClear">清空画廊</button>
@@ -876,7 +876,7 @@ footer{text-align:center;padding:26px 20px 34px;color:var(--ink-faint);font-size
       </div>
     </div>
 
-    <div class="sec"><h4>提示</h4>
+    <div class="sec" id="helpSec"><h4>提示</h4>
       <p class="muted">· 生成走 <code>/v1/nai/generate-image</code>（当前账号的 API Token）；「报价」按钮预估本次 Gems。<br>
       · 图生图 / 局部重绘在「高级」里展开；蒙版白色区域会被重绘。<br>
       · 种子固定 + 相同参数 = 像素级一致，适合做表情差分。<br>
@@ -908,6 +908,7 @@ const S = {
   akey: localStorage.getItem("ynai_st_akey") || "",
   jwtLocal: localStorage.getItem("ynai_st_jwt") || "",
   needAkey: false,
+  admin: true,    // 云端：带对访问密钥（或未设密钥）= 站长；本地模式恒为 true
   user: "", uid: "", authenticated: false,
   cloud: false,   // 由启动探测决定：wrangler/部署环境 true，serve.py/file:// false
   promptVersion: localStorage.getItem("ynai_st_pver") || "v5",  models: [], accounts: [],
@@ -927,6 +928,11 @@ function toast(msg, type=""){
   t.className = "toast " + type; t.textContent = msg;   // 纯文本，杜绝注入
   box.appendChild(t);
   setTimeout(()=>{ t.style.opacity="0"; t.style.transition=".4s"; setTimeout(()=>t.remove(),420); }, 4200);
+}
+// 复制到剪贴板：优先 Clipboard API，失败（无权限 / 非 HTTPS）退回 execCommand；返回是否成功，不再抛未处理异常
+async function copyText(text){
+  try{ if (navigator.clipboard?.writeText){ await navigator.clipboard.writeText(text); return true; } }catch(e){}
+  try{ const ta = document.createElement("textarea"); ta.value = text; ta.style.cssText = "position:fixed;opacity:0"; document.body.appendChild(ta); ta.select(); const ok = document.execCommand("copy"); ta.remove(); return ok; }catch(e){ return false; }
 }
 function esc(s){ return String(s??"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 const MODEL_LABEL = {
@@ -956,7 +962,7 @@ const CLOUD_PATH = {
   "/api/ynai/user/balance":"/api/yesnai/balance",
   "/api/user/checkin":"/api/yesnai/checkin",
 };
-async function api(path, {method="GET", body=null, auth="none", timeoutMs=45000, responseType="json", extraHeaders=null} = {}){
+async function api(path, {method="GET", body=null, form=null, auth="none", timeoutMs=45000, responseType="json", extraHeaders=null} = {}){
   const localDirect = !S.cloud && /^\/api\/prompt\//.test(path);
   const targetPath = S.cloud ? (CLOUD_PATH[path] || path) : (localDirect ? path : "/p" + path);
   const headers = {};
@@ -965,14 +971,14 @@ async function api(path, {method="GET", body=null, auth="none", timeoutMs=45000,
   if (S.cloud){ const acct = currentAcctId(); if (acct) headers["X-Account-Id"] = String(acct); }
   if (!S.cloud && auth === "token" && S.token) headers["Authorization"] = "Bearer " + S.token;
   if (!S.cloud && auth === "jwt" && S.jwtLocal) headers["Authorization"] = "Bearer " + S.jwtLocal;
-  if (body !== null) headers["Content-Type"] = "application/json";
+  if (body !== null && !form) headers["Content-Type"] = "application/json";   // FormData 由浏览器自带 boundary
   if (extraHeaders) Object.assign(headers, extraHeaders);
   const ac = new AbortController();
   const timer = setTimeout(()=>ac.abort(), timeoutMs);
   let res;
   try{
     res = await fetch(targetPath, {method, headers, credentials:"include",
-      body: body !== null ? JSON.stringify(body) : undefined, signal: ac.signal});
+      body: form || (body !== null ? JSON.stringify(body) : undefined), signal: ac.signal});
   }catch(e){
     throw new Error(e.name === "AbortError"
       ? `请求超时（${Math.round(timeoutMs/1000)}s）`
@@ -1019,8 +1025,9 @@ async function appSession(silent=true){
   if (!S.cloud) return null;
   try{
     const r = await api("/api/session");
-    S.authenticated = !!r.configured; S.user = r.configured ? "云端多账号" : "";
-    cloudSession(r); loginUI(); acctLoad();
+    applyAccess(r);
+    S.authenticated = !!r.configured && S.admin; S.user = S.authenticated ? "云端多账号" : "";
+    cloudSession(r); loginUI(); if (S.admin) acctLoad();
     return r;
   }catch(e){ if(!silent) toast("会话查询失败：" + e.message, "err"); return null; }
 }
@@ -1170,7 +1177,7 @@ async function quote(){
 async function generate(){
   if (S.genBusy) return;
   if (!S.cloud && !S.token) return openSettings("生图前请先填写 API Token");
-  if (S.cloud && !S.akey && S.needAkey) return openSettings("请先在设置里填写访问密钥");
+  if (S.cloud && !S.admin) return openSettings("请先在设置里填写访问密钥");
   // 模型列表可能因启动时网络/密钥问题没拉到：生成前现场补拉一次
   if (!$("model").value){
     await loadModels();
@@ -1289,7 +1296,12 @@ function galRevoke(ids){
 async function galSave(b64, fmt, meta){
   const th = await makeThumb(b64, fmt);
   if (S.cloud){
-    const r = await api("/api/gallery", {method:"POST", body:{image:b64, thumb:th.b64, fmt, thumb_fmt:th.fmt, meta}, timeoutMs:120000});
+    // 二进制 multipart 上传：比 base64 JSON 小约 1/3，Worker 也不用再解码
+    const fd = new FormData();
+    fd.append("image", b64ToBlob(b64, fmt), "image." + fmt);
+    if (th.b64) fd.append("thumb", b64ToBlob(th.b64, th.fmt), "thumb." + th.fmt);
+    fd.append("fmt", fmt); fd.append("thumb_fmt", th.fmt); fd.append("meta", JSON.stringify(meta));
+    const r = await api("/api/gallery", {method:"POST", form:fd, timeoutMs:120000});
     return { id: r.id, ts: meta.ts, fmt, thumb_fmt: th.fmt, ...meta };
   }
   const id = "loc_" + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
@@ -1297,7 +1309,12 @@ async function galSave(b64, fmt, meta){
   await idbTx("readwrite", st=>st.put(rec));
   return rec;
 }
-function galCountUpdate(){ $("galCount").textContent = gal.total > 0 ? gal.total + " 张" : ""; }
+function galCountUpdate(){
+  // 云端画廊顺带显示 R2 占用（免费额度 10 GB）
+  const gb = S.cloud && gal.bytes > 0 ? ` · ${gal.bytes >= 1e9 ? (gal.bytes/1e9).toFixed(2) + " GB" : Math.max(1, Math.round(gal.bytes/1e6)) + " MB"} / 10 GB` : "";
+  $("galCount").textContent = gal.total > 0 ? gal.total + " 张" + gb : "";
+  $("galCount").title = gb ? "Cloudflare R2 免费额度 10 GB，超出后按量计费" : "";
+}
 function galFilterValues(){ gal.filters.q=$("galSearch")?.value.trim().toLowerCase()||""; gal.filters.model=$("galModelFilter")?.value||""; gal.filters.artist=$("galArtistFilter")?.value.trim().toLowerCase()||""; }
 function galItemMatches(x){ const f=gal.filters, hay=[x.prompt,x.promptBase,x.artist,x.artistName,x.model,x.promptHash,x.prompt_hash,x.snapshotId,x.snapshot_id].join(" ").toLowerCase(); return (!f.q||hay.includes(f.q))&&(!f.model||x.model===f.model)&&(!f.artist||[x.artist,x.artistName].join(" ").toLowerCase().includes(f.artist)); }
 function galFilterChanged(){ galFilterValues(); gal.items=[];gal.offset=0;gal.total=-1;galRevoke();galLoadMore(); }
@@ -1318,6 +1335,7 @@ function galCard(item){
       <button class="btn ghost small" data-a="reuse">复现</button>
       <button class="btn ghost small" data-a="artist">画师串</button>
       <button class="btn ghost small" data-a="dl">下载</button>
+      ${S.cloud && S.admin && !String(item.id).startsWith("tmp_") ? `<button class="btn ghost small" data-a="pub">${item.public ? "已发布" : "发布"}</button>` : ""}
       <button class="btn ghost small" data-a="rm">✕</button>
     </div>`;
   const spans = el.querySelectorAll(".meta span");
@@ -1347,6 +1365,8 @@ function galCard(item){
     }catch(e){ toast("下载原图失败：" + e.message, "err"); }
   };
   el.querySelector('[data-a=rm]').onclick = e=>{ e.stopPropagation(); galRemove(item, el); };
+  const pubBtn = el.querySelector('[data-a=pub]');
+  if (pubBtn) pubBtn.onclick = e=>{ e.stopPropagation(); publishOpen(item, pubBtn); };
   return el;
 }
 async function galOpen(item){
@@ -1378,15 +1398,19 @@ function galRender(){
   $("galFoot").style.display = gal.offset < gal.total ? "" : "none";
 }
 async function galLoadMore(){
-  if (gal.busy) return;
+  if (gal.busy || (S.cloud && !S.admin)) return;   // 未授权没有云端画廊
   gal.busy = true;
   try{
     if (S.cloud){
       const params=new URLSearchParams({limit:String(GAL_PAGE),offset:String(gal.offset)}); if(gal.filters.q)params.set("q",gal.filters.q);if(gal.filters.model)params.set("model",gal.filters.model);if(gal.filters.artist)params.set("artist",gal.filters.artist);if(gal.filters.hash)params.set("prompt_hash",gal.filters.hash);
       const r = await api(`/api/gallery?${params}`, {timeoutMs:30000});
-      gal.total = r.total || 0;
+      const got = (r.items||[]).length;
+      // 服务端只在第一页给总数（省 D1 读取额度），翻页时沿用；没有总数时按 has_more 推断
+      if (r.total != null) gal.total = r.total;
+      else gal.total = r.has_more ? Math.max(gal.total, gal.offset + got + 1) : gal.offset + got;
+      if (r.storage_bytes != null) gal.bytes = r.storage_bytes;
       gal.items.push(...(r.items||[]));
-      gal.offset += (r.items||[]).length;
+      gal.offset += got;
     } else {
       const all = ((await idbTx("readonly", st=>st.getAll())) || []).filter(galItemMatches).sort((a,b)=>b.ts-a.ts);
       gal.total = all.length;
@@ -1415,9 +1439,59 @@ function galPrependTransient(b64, fmt, meta){
   gal.urls.set(id + ":img", dataUrl);
   galPrepend({id, ...meta, fmt, thumb_fmt: fmt});
 }
+/* ================= 发布到作品广场 ================= */
+// 原来后端有发布接口、广场页也在，但主页面没有任何发布入口，广场永远是空的
+let PUB = null;
+function publishOpen(item, btn){
+  PUB = {item, btn};
+  let m = $("publishModal");
+  if (!m){
+    m = document.createElement("div"); m.className = "modal"; m.id = "publishModal";
+    m.innerHTML = `<div class="box" style="width:min(480px,100%)"><button class="close" data-close>✕</button><h3>发布到作品广场</h3>
+      <label class="f" style="margin-bottom:10px"><span>标题（中英文、数字、空格、. _ -）</span><input type="text" id="pubTitle" maxlength="200"></label>
+      <label class="f" style="margin-bottom:10px"><span>标签（逗号分隔，可选）</span><input type="text" id="pubTags" maxlength="2000" placeholder="例如：少女, 雨夜, 赛博朋克"></label>
+      <label class="f" style="margin-bottom:10px"><span>分级</span><select id="pubRating"><option value="general">全年龄</option><option value="r15">R15</option><option value="r17">R17</option></select></label>
+      <label class="switch" style="margin-bottom:8px"><input type="checkbox" id="pubPrompt"><i></i>公开提示词</label>
+      <label class="switch" style="margin-bottom:14px"><input type="checkbox" id="pubParams"><i></i>公开生成参数</label>
+      <div class="row"><button class="btn primary small" id="pubGo" type="button">发布</button><button class="btn ghost small" id="pubUndo" type="button">撤回发布</button><a class="btn ghost small" href="/square.html" target="_blank" rel="noopener">打开广场</a></div>
+      <p class="muted" id="pubOut" style="margin-top:8px"></p></div>`;
+    document.body.appendChild(m);
+    $("pubGo").onclick = publishGo; $("pubUndo").onclick = publishUndo;
+  }
+  $("pubTitle").value = item.title || ("作品 " + new Date(item.ts || Date.now()).toLocaleDateString("zh-CN").replace(/\//g, "-"));
+  $("pubTags").value = item.tags || "";
+  $("pubRating").value = item.rating || "general";
+  $("pubPrompt").checked = !!item.prompt_disclosed; $("pubParams").checked = !!item.params_disclosed;
+  $("pubUndo").style.display = item.public ? "" : "none";
+  $("pubOut").textContent = item.public ? "该作品已在广场公开，可修改后重新发布或撤回" : "";
+  m.style.zIndex = String(200); m.classList.add("on");
+}
+async function publishGo(){
+  const {item, btn} = PUB || {}; if (!item) return;
+  const title = $("pubTitle").value.trim();
+  if (!/^[A-Za-z0-9_\u4e00-\u9fff][A-Za-z0-9_\u4e00-\u9fff .-]{0,199}$/.test(title)) return toast("标题只能包含中英文、数字、空格和 . _ -，且不能以符号开头", "warn");
+  const tags = $("pubTags").value.replace(/，/g, ",").split(",").map(x=>x.trim()).filter(Boolean);
+  if (tags.some(t=>!/^[A-Za-z0-9_\u4e00-\u9fff .-]+$/.test(t))) return toast("标签只能包含中英文、数字、空格和 . _ -", "warn");
+  try{
+    await api(`/api/gallery/${encodeURIComponent(item.id)}/publish`, {method:"POST", body:{title, tags, rating:$("pubRating").value, promptDisclosed:$("pubPrompt").checked, paramsDisclosed:$("pubParams").checked}});
+    Object.assign(item, {public:1, title, tags:tags.join(", "), rating:$("pubRating").value, prompt_disclosed:$("pubPrompt").checked ? 1 : 0, params_disclosed:$("pubParams").checked ? 1 : 0});
+    if (btn) btn.textContent = "已发布";
+    $("publishModal").classList.remove("on"); toast("已发布到作品广场 ✦", "ok");
+  }catch(e){ toast("发布失败：" + e.message, "err"); }
+}
+async function publishUndo(){
+  const {item, btn} = PUB || {}; if (!item) return;
+  try{
+    await api(`/api/gallery/${encodeURIComponent(item.id)}/unpublish`, {method:"POST", body:{}});
+    item.public = 0; if (btn) btn.textContent = "发布";
+    $("publishModal").classList.remove("on"); toast("已从广场撤回", "ok");
+  }catch(e){ toast("撤回失败：" + e.message, "err"); }
+}
 async function galRemove(item, el){
   try{
-    if (S.cloud) await api("/api/gallery/" + encodeURIComponent(item.id), {method:"DELETE"});
+    // 未入库的临时图（关闭自动入库 / 入库失败）只从页面移除，不请求删除接口
+    if (String(item.id).startsWith("tmp_")) {}
+    else if (S.cloud) await api("/api/gallery/" + encodeURIComponent(item.id), {method:"DELETE"});
     else await idbTx("readwrite", st=>st.delete(item.id));
     el.remove();
     gal.items = gal.items.filter(x=>x.id!==item.id);
@@ -1578,10 +1652,27 @@ function cloudSession(r){
   if (!$('cloudState')) return;
   S.needAkey = !!r?.access_key_required;
   const n = r?.accounts ?? (r?.configured ? 1 : 0);
-  $('cloudState').textContent =
-    (r?.configured ? `✓ 云端已就绪 · ${n} 个账号接入` : '✗ 尚无账号——在下方添加，或配置 YESNAI_JWT Secret 引导') +
-    (S.needAkey && !S.akey ? ' · ⚠ 需要访问密钥' : '');
-  promptApiRefresh();
+  if (!S.admin) $('cloudState').textContent = S.akey ? '⚠ 访问密钥不正确' : '⚠ 需要访问密钥（向站长索取）';
+  else $('cloudState').textContent = r?.configured ? `✓ 云端已就绪 · ${n} 个账号接入` : '✗ 尚无账号——在下方添加，或配置 YESNAI_JWT Secret 引导';
+  if (S.admin) promptApiRefresh();
+}
+
+/* ================= 访问状态 ================= */
+// 根据 /api/session 判定身份：站长（admin，密钥正确或未设密钥）/ 锁定（需要密钥）
+function applyAccess(r){
+  if (!S.cloud){ S.admin = true; return; }
+  const wasAdmin = S.admin;
+  S.needAkey = !!r?.access_key_required;
+  S.admin = !S.needAkey || r?.admin_authenticated === true;
+  modeUI();
+  return wasAdmin !== S.admin;   // 身份变了，调用方据此重载数据
+}
+// 身份变化后重载与身份相关的数据（模型列表、画廊、账号等）
+function accessReload(){
+  loadModels();
+  galRevoke(); gal.items = []; gal.offset = 0; gal.total = -1; galRender();
+  if (!S.cloud || S.admin) galLoadMore();
+  if (S.cloud && S.admin){ acctLoad(); refreshBalance(true); acRefresh(); tokLoad(); gatewayLoad(); }
 }
 async function promptApiRefresh(){
   const sec = $('promptApiSec'); if (!sec) return;
@@ -1676,7 +1767,7 @@ function renderTokenCard(t){
       <button class="btn ghost small" data-a="del">删除</button>
     </div>`;
   el.querySelector(".tokkey").onclick = ()=>{
-    navigator.clipboard?.writeText(t.key).then(()=>toast("密钥已复制", "ok"), ()=>toast("复制失败，请手动选择", "warn"));
+    copyText(t.key).then(ok=>toast(ok ? "密钥已复制" : "复制失败，请手动选择", ok ? "ok" : "warn"));
   };
   el.querySelector('[data-a=tgl]').onclick = async ()=>{
     try{ await api(`/api/tokens/${t.id}`, {method:"PATCH", body:{enabled: !t.enabled}}); tokLoad(); }
@@ -1694,7 +1785,7 @@ async function tokCreate(){
   try{
     const t = await api("/api/tokens", {method:"POST", body:{name}});
     $("tokName").value = "";
-    navigator.clipboard?.writeText(t.key).then(()=>toast("密钥已生成并复制到剪贴板", "ok"), ()=>toast("密钥已生成", "ok"));
+    copyText(t.key).then(ok=>toast(ok ? "密钥已生成并复制到剪贴板" : "密钥已生成（点密钥可复制）", "ok"));
     tokLoad();
   }catch(e){ toast("生成失败：" + e.message, "err"); }
 }
@@ -1737,7 +1828,7 @@ function renderGatewayCard(k){
   const el=document.createElement("div"); el.className="acct";
   const mode=k.request_mode||"restricted", models=Array.isArray(k.allowed_models)&&k.allowed_models.length?k.allowed_models.join(", "):"全部模型";
   el.innerHTML=`<div class="top"><b>${esc(k.name||"未命名")}</b>${k.enabled===false?'<span class="tag paid">停用</span>':'<span class="tag">启用</span>'}<span class="st">${esc(mode)} · ${esc(models)}${k.key?" · "+esc(k.key):""}</span></div><div class="muted" style="margin-top:5px">请求 ${k.daily_requests??"不限"}/日 · Gems ${k.daily_gems??"不限"}/日 · 并发 ${k.max_concurrency??"不限"} · 参数 ${esc(k.parameter_mode||"allowlist")} · 额外参数 ${k.allow_extra_parameters===false?"禁止":"允许"} · img2img ${k.allow_img2img?"✓":"—"} · inpaint ${k.allow_inpaint?"✓":"—"}</div><div class="ops"><code class="tokkey" title="点击复制">${esc(k.key||"")}</code><button class="btn ghost small" data-a="edit">编辑</button><button class="btn ghost small" data-a="tgl">${k.enabled===false?"启用":"停用"}</button><button class="btn ghost small" data-a="del">删除</button></div>`;
-  el.querySelector(".tokkey").onclick=()=>k.key&&navigator.clipboard?.writeText(k.key).then(()=>toast("网关密钥已复制","ok"));
+  el.querySelector(".tokkey").onclick=async()=>{if(!k.key)return;const ok=await copyText(k.key);toast(ok?"网关密钥已复制":"复制失败，请手动选择",ok?"ok":"warn");};
   el.querySelector('[data-a=edit]').onclick=()=>gatewayEdit(k);
   el.querySelector('[data-a=tgl]').onclick=async()=>{try{await api(`/api/gateway/keys/${k.id}`,{method:"PATCH",body:{enabled:k.enabled===false}});gatewayLoad();}catch(e){toast("操作失败："+e.message,"err");}};
   el.querySelector('[data-a=del]').onclick=()=>{if(!confirm(`删除网关密钥「${k.name||"未命名"}」？`))return;api(`/api/gateway/keys/${k.id}`,{method:"DELETE"}).then(()=>{toast("已删除","ok");gatewayLoad();}).catch(e=>toast("删除失败："+e.message,"err"));};
@@ -1749,7 +1840,7 @@ async function gatewayLoad(){
   catch(e){box.innerHTML='<p class="muted">网关策略加载失败：'+esc(e.message)+"</p>";}
 }
 async function gatewaySave(){
-  const btn=$("gatewaySave"); try{const body=gatewayPayload();if(!body.name)return toast("请填写网关密钥备注名","warn");btn.disabled=true;const path=gatewayEditing?`/api/gateway/keys/${gatewayEditing.id}`:"/api/gateway/keys";const r=await api(path,{method:gatewayEditing?"PATCH":"POST",body});if(r?.key)navigator.clipboard?.writeText(r.key);toast(gatewayEditing?"网关策略已保存":"网关密钥已生成并复制到剪贴板","ok");gatewayReset();gatewayLoad();}catch(e){toast("保存网关策略失败："+e.message,"err");}finally{btn.disabled=false;}
+  const btn=$("gatewaySave"); try{const body=gatewayPayload();if(!body.name)return toast("请填写网关密钥备注名","warn");btn.disabled=true;const path=gatewayEditing?`/api/gateway/keys/${gatewayEditing.id}`:"/api/gateway/keys";const r=await api(path,{method:gatewayEditing?"PATCH":"POST",body});const copied=!gatewayEditing&&r?.key?await copyText(r.key):false;toast(gatewayEditing?"网关策略已保存":(copied?"网关密钥已生成并复制到剪贴板":"网关密钥已生成（点密钥可复制）"),"ok");gatewayReset();gatewayLoad();}catch(e){toast("保存网关策略失败："+e.message,"err");}finally{btn.disabled=false;}
 }
 
 // 生图账号选择：auto 直接交给 Worker 轮询（多账号额度集合、按次轮转分摊），
@@ -1866,7 +1957,13 @@ async function acctAdd(){
 }
 async function acctRefreshGems(){
   try{
-    const r = await api("/api/accounts/refresh_gems", {method:"POST", body:{}, timeoutMs:180000});
+    // 服务端每次只刷新一页（免费计划单次调用子请求上限 50），按 next_offset 续传直到刷完
+    let r, offset = 0;
+    for (let i = 0; i < 40; i++){
+      r = await api("/api/accounts/refresh_gems", {method:"POST", body:{offset}, timeoutMs:180000});
+      if (r.next_offset == null || r.next_offset <= offset) break;
+      offset = r.next_offset;
+    }
     acctRender(r.items || []);
     toast("全部余额已刷新", "ok");
     refreshBalance(true);
@@ -1893,12 +1990,21 @@ async function acctBulkImport(){
   $("acctBulkBtn").disabled = true;
   $("acctBulkOut").textContent = `导入中…共 ${items.length} 个，逐个登录请稍候`;
   try{
-    const r = await api("/api/accounts/batch", {method:"POST", body:{items}, timeoutMs:300000});
-    const fails = (r.results||[]).filter(x=>!x.ok);
-    $("acctBulkOut").textContent = `成功 ${r.added} / ${items.length}` +
+    // 服务端每次最多处理 8 个（免费计划单次调用子请求上限 50），剩下的通过 remaining 返回，循环提交
+    let queue = items, r = null, added = 0; const results = [];
+    for (let i = 0; i < 40 && queue.length; i++){
+      r = await api("/api/accounts/batch", {method:"POST", body:{items:queue}, timeoutMs:300000});
+      results.push(...(r.results||[])); added += r.added || 0;
+      const rest = Array.isArray(r.remaining) ? r.remaining : [];
+      if (rest.length >= queue.length) break;
+      queue = rest;
+      if (queue.length) $("acctBulkOut").textContent = `导入中…已处理 ${items.length - queue.length} / ${items.length}`;
+    }
+    const fails = results.filter(x=>!x.ok);
+    $("acctBulkOut").textContent = `成功 ${added} / ${items.length}` +
       (fails.length ? ` · 失败：` + fails.map(f=>`${esc(f.username)}(${esc(String(f.message).slice(0,30))})`).join("、").slice(0,220) : "");
-    toast(`批量导入完成：成功 ${r.addd ?? r.added} 个`, r.added ? "ok" : "err");
-    acctRender(r.items || []);
+    toast(`批量导入完成：成功 ${added} 个`, added ? "ok" : "err");
+    acctRender(r?.items || []);
   }catch(e){
     $("acctBulkOut").textContent = "导入失败：" + e.message;
     toast("批量导入失败：" + e.message, "err");
@@ -2269,9 +2375,11 @@ async function acctProvisionAll(){
 function openSettings(tip){
   $("setModal").classList.add("on");
   if (tip) toast(tip, "warn");
-  acRefresh();
   if ($("galStore")) $("galStore").textContent = S.cloud ? "云端画廊存 Cloudflare R2" : "本地画廊存浏览器 IndexedDB";
-  if (S.cloud){ api("/api/session").then(cloudSession).catch(()=>{}); acctLoad(); }
+  if (S.cloud) api("/api/session").then(r=>{ if (applyAccess(r)) accessReload(); cloudSession(r); }).catch(()=>{});
+  if (S.cloud && !S.admin) return;   // 未授权：只显示访问密钥区块，不发管理接口请求
+  acRefresh();
+  if (S.cloud) acctLoad();
   regLoad();
   walLoad();   // 已登录才拉钱包/签到数据；未登录只切换到登录态，不发请求
 }
@@ -2279,13 +2387,17 @@ function saveSettings(){
   if (S.cloud){
     S.akey = $("cfgAkey").value.trim();
     save("ynai_st_akey", S.akey);
-    api("/api/session").then(cloudSession).catch(()=>{});
-    acctLoad();
-    // 密钥刚填上时把启动阶段被 401 挡掉的模型列表/余额补拉回来，免去手动刷新
-    if (S.akey){
-      if (!S.models.length) loadModels();
-      refreshBalance(true);
-    }
+    // 重新判定身份：密钥正确 → 站长，解锁并重载全部数据；不正确 → 保持锁定
+    api("/api/session").then(r=>{
+      const changed = applyAccess(r);
+      S.authenticated = !!r.configured && S.admin; S.user = S.authenticated ? "云端多账号" : "";
+      cloudSession(r); loginUI();
+      if (changed) accessReload();
+      else if (S.admin){ acctLoad(); if (!S.models.length) loadModels(); refreshBalance(true); }
+      if (S.akey && !S.admin) toast("访问密钥不正确", "err");
+      else if (S.admin && changed) toast("已进入站长模式 ✦", "ok");
+      if (S.admin && $("setModal").classList.contains("on")){ acRefresh(); regLoad(); walLoad(); }
+    }).catch(e=>toast("会话查询失败：" + e.message, "err"));
     return;
   }
   const base = $("cfgBase").value.trim().replace(/\/+$/,"");
@@ -2353,10 +2465,13 @@ function addTime(containerId){
 }
 async function acSave(){
   try{
+    // 阈值先夹到 1-10000：原来填了非法值后，这次以及之后的所有签到设置（开关、时间、时区）都会被服务端整体拒绝
+    const thEl = $("acAutobuyThreshold");
+    if (thEl){ const n = Math.min(10000, Math.max(1, Math.floor(Number(thEl.value) || 8))); if (String(n) !== thEl.value) thEl.value = String(n); }
     const body = {enabled:$("acEnabled").checked, timezone:$("acZone").value,
       weekday_times:readTimes("weekdayTimes"), weekend_times:readTimes("weekendTimes"),
       autobuy_enabled:$("acAutobuy") ? $("acAutobuy").checked : undefined,
-      autobuy_threshold:$("acAutobuyThreshold") ? Number($("acAutobuyThreshold").value) : undefined};
+      autobuy_threshold:thEl ? Number(thEl.value) : undefined};
     const res = await fetch(S.cloud ? "/api/autocheckin/settings" : "/reg",
       {method:S.cloud ? "PATCH" : "POST", headers:acHeaders(), credentials:"include", body:JSON.stringify(body)});
     if (!res.ok){
@@ -2366,17 +2481,23 @@ async function acSave(){
     }
     toast("自动签到设置已保存", "ok");
     acRefresh();
-  }catch(e){ toast("保存失败：" + e.message, "err"); }
+  }catch(e){ toast("保存失败：" + e.message, "err"); acRefresh(); }   // 失败时把界面恢复成服务端的真实状态
 }
 async function acTest(){
   toast(S.cloud ? "正在对全部启用账号执行签到测试…" : "正在测试签到…");
   try{
     const parts = []; let okAll = true, anyOk = false;
     if (S.cloud){
-      const res = await fetch("/api/autocheckin/test", {method:"POST", headers:acHeaders(), credentials:"include", body:"{}"});
-      const j = await res.json().catch(()=>null);
-      if (!res.ok) throw new Error(j?.error?.message || ("HTTP " + res.status));
-      const rs = j.results || [];
+      // 服务端每次只测几个账号（免费计划单次调用子请求上限 50），按 next_offset 续传
+      const rs = []; let offset = 0;
+      for (let i = 0; i < 40; i++){
+        const res = await fetch("/api/autocheckin/test", {method:"POST", headers:acHeaders(), credentials:"include", body:JSON.stringify({offset})});
+        const j = await res.json().catch(()=>null);
+        if (!res.ok) throw new Error(j?.error?.message || ("HTTP " + res.status));
+        rs.push(...(j.results || []));
+        if (j.next_offset == null || j.next_offset <= offset) break;
+        offset = j.next_offset;
+      }
       if (!rs.length) throw new Error("没有启用中的账号");
       for (const t of rs){
         parts.push((t.account?`[${t.account}] `:"") + (t.ok?"✓":"✗") + " " + (t.message || ""));
@@ -2868,9 +2989,9 @@ function awbRenderAutocomplete(){
   list.hidden=false; AWB.acIndex=items.length?0:-1;
 }
 function awbAcceptAutocomplete(){
-  const list=$("#awbAcList"), item=list?.querySelectorAll("[data-ac-name]")?.[AWB.acIndex??0]; if(!item)return;
+  const list=$("awbAcList"), item=list?.querySelectorAll("[data-ac-name]")?.[AWB.acIndex??0]; if(!item)return;
   const name=item.dataset.acName; const hit=tagSuggestions(name)[0]; if(item.querySelector("small")?.textContent!=="加入画师串" && hit && hit.name===name){ const p=$("prompt"); p.value=artistNormalize(p.value)+(p.value.trim()?", ":"")+name; persistForm(); toast(`已加入标签：${name}`,"ok"); } else if(AWB.tokens.some(t=>t.kind==="artist"&&t.enabled!==false&&artistCanonical(t.name||t.raw)===artistCanonical(name))) {toast("当前串已有这位画师","warn");} else awbAppendArtists([name],"快速加入");
-  $("#awbAddArtist").value=""; list.hidden=true; list.innerHTML="";
+  $("awbAddArtist").value=""; list.hidden=true; list.innerHTML="";
 }
 function awbChipEl(t){
   const el = document.createElement("span");
@@ -3203,12 +3324,15 @@ async function awbAiCheck(){
   catch(e){note.textContent="AI 暂不可用："+(e.hint||e.message||"请检查设置");note.className="awb-note warn";note.style.display="";st.textContent="不可用";}
 }
 
-function tfBalanced(s,open,close){let d=0;for(const c of String(s)){if(c===open)d++;else if(c===close&&!--d)return false;}return d===0;}
+function tfBalanced(s,open,close){let d=0;for(const c of String(s)){if(c===open)d++;else if(c===close&&--d<0)return false;}return d===0;}   // 原来深度回到 0 就判不平衡，{{tag}} 这类嵌套强调永远解析不出权重
 function tfLooksSentence(s){const x=String(s).trim(),n=x.split(/\s+/).filter(Boolean).length;return x.length>70||n>=6||(/[.!?。！？]$/.test(x)&&n>=4)||(/\s(the|is|are|was|were|his|her|their|while|toward|against|behind)\s/i.test(" "+x+" ")&&n>=4);}
 function tfSplitTop(s,sep){const out=[];let start=0,d=0;for(let i=0;i<s.length;i++){const c=s[i];if("([{".includes(c))d++;else if(")]}".includes(c))d=Math.max(0,d-1);if(d===0&&s.startsWith(sep,i)){out.push(s.slice(start,i));start=i+sep.length;i+=sep.length-1;}}out.push(s.slice(start));return out;}
-function tfAtom(raw){let x=String(raw).trim(),weight=1,changed=true;const original=x;const m=x.match(/^\((.+):\s*(-?[\d.]+)\)$/s);if(m&&tfBalanced(m[1],"(",")"))return {kind:"tag",name:m[1].trim(),weight:Number(m[2]),raw:original};while(changed){changed=false;const q=x[0],z=x.at(-1),map={"{":1.05,"[":1/1.05,"(":1.1};if(map[q]&&((q==="{"&&z==="}")||(q==="["&&z==="]")||(q==="("&&z===")"))&&tfBalanced(x.slice(1,-1),q,{"{":"}","[":"]","(":")"}[q])){weight*=map[q];x=x.slice(1,-1).trim();changed=true;}}return {kind:tfLooksSentence(x)?"sentence":"tag",name:x,weight:Math.round(weight*100)/100,raw:original};}
+function tfAtom(raw){let x=String(raw).trim(),weight=1,changed=true;const original=x;const m=x.match(/^\((.+):\s*(-?[\d.]+)\)$/s);if(m&&tfBalanced(m[1],"(",")"))return {kind:"tag",name:m[1].trim(),weight:Number(m[2]),raw:original};const nw=x.match(/^(-?\d+(?:\.\d+)?)::([\s\S]+?)::$/);if(nw&&!nw[2].includes("::"))return {kind:tfLooksSentence(nw[2])?"sentence":"tag",name:nw[2].trim(),weight:Number(nw[1]),raw:original};while(changed){changed=false;const q=x[0],z=x.at(-1),map={"{":1.05,"[":1/1.05};if(map[q]&&((q==="{"&&z==="}")||(q==="["&&z==="]"))&&tfBalanced(x.slice(1,-1),q,{"{":"}","[":"]"}[q])){weight*=map[q];x=x.slice(1,-1).trim();changed=true;}}return {kind:tfLooksSentence(x)?"sentence":"tag",name:x,weight:Math.round(weight*100)/100,raw:original};}
 function tfParse(text){return String(text||"").split(/\|/).map((seg,si)=>({label:si?`角色 ${si}`:"基础",items:seg.split(/\n/).map(line=>tfSplitTop(line,",").map(x=>tfAtom(x)).filter(x=>x.name))}));}
-function tfSerialize(data){return data.map(s=>s.items.map(row=>row.map(x=>x.kind==="sentence"?x.name:(Math.abs((x.weight||1)-1)<.001?x.name:`(${x.name}:${Number(x.weight.toFixed(2))})`)).join(", ")).join("\n")).join(" | ");}
+// 写回用 NovelAI 语法：1.05 的整数次方用 {…}/[…]，其余用 V4+ 数值强调 w::tag::。
+// 原来写成 Stable Diffusion 的 (tag:1.05)，NovelAI 不认，括号会被当成普通文字、强调全部失效。
+function tfWeightText(name,w){w=Number(w)||1;if(Math.abs(w-1)<.001)return name;for(let n=1;n<=5;n++){if(Math.abs(w-Math.pow(1.05,n))<.006)return "{".repeat(n)+name+"}".repeat(n);if(Math.abs(w-Math.pow(1.05,-n))<.006)return "[".repeat(n)+name+"]".repeat(n);}return `${Number(w.toFixed(2))}::${name}::`;}
+function tfSerialize(data){return data.map(s=>s.items.map(row=>row.map(x=>tfWeightText(x.name,x.weight)).join(", ")).join("\n")).join(" | ");}
 function tfClassify(x){const n=String(x.name||x.raw||"").toLowerCase();if(x.kind==="sentence")return "sentence";if(/^artist\s*:/i.test(n))return "artist";return "";}
 function tfRender(){const box=$("tagFlowSegments"),data=TF.data;if(!box)return;box.innerHTML=data.map((seg,si)=>`<div class="tagflow-seg"><h4>${esc(seg.label)}</h4><div class="tagflow-row">${seg.items.flatMap((row,ri)=>row.map((x,ii)=>`<span class="tagflow-chip ${tfClassify(x)}" draggable="true" data-tf-s="${si}" data-tf-r="${ri}" data-tf-i="${ii}"><span class="tfname">${esc(x.name)}</span>${x.weight!==1?`<span class="tfw">×${x.weight.toFixed(2)}</span>`:""}<button type="button" data-tf-del title="删除">×</button></span>`)).join("")}</div></div>`).join("");
   box.querySelectorAll("[data-tf-del]").forEach(b=>b.onclick=e=>{e.stopPropagation();const c=e.target.closest("[data-tf-s]"),s=data[+c.dataset.tfS],r=s.items[+c.dataset.tfR];r.splice(+c.dataset.tfI,1);if(!r.length)s.items.splice(+c.dataset.tfR,1);tfSaveHistory();tfRender();});
@@ -3240,6 +3364,9 @@ function modeUI(){
   loginUI();
 }
 
+// 后打开的弹窗总在最上层：在「设置」里点账号的「时间」等会打开第二个弹窗，原来它被设置弹窗盖住、无法操作
+(()=>{ let z = 60; const mo = new MutationObserver(ms=>{ for (const m of ms){ const el = m.target; if (el.classList.contains("on") && !/\bon\b/.test(m.oldValue || "")) el.style.zIndex = String(++z); } });
+  document.addEventListener("DOMContentLoaded", ()=>document.querySelectorAll(".modal").forEach(el=>mo.observe(el, {attributes:true, attributeFilter:["class"], attributeOldValue:true}))); })();
 document.addEventListener("DOMContentLoaded", async ()=>{
   document.addEventListener("click", e=>{
     const close = e.target.closest?.("[data-close]");
@@ -3308,10 +3435,14 @@ document.addEventListener("DOMContentLoaded", async ()=>{
   restoreForm(); renderHist();
   artistSeed(); artistRender();
   setRender();
+  // 云端先判定身份（站长 / 需密钥），再按身份加载模型与画廊，避免未授权时启动一串 401
+  if (S.cloud) await appSession();
   loadModels();
-  galRender(); galLoadMore();
+  galRender();
+  if (!S.cloud || S.admin) galLoadMore();
   if (S.cloud) {
-    appSession().then(()=>{ refreshBalance(true); acRefresh(); tokLoad(); gatewayLoad(); if (!S.models.length) loadModels(); });
+    if (S.admin) { refreshBalance(true); acRefresh(); tokLoad(); gatewayLoad(); }
+    else setTimeout(()=>openSettings("请先填写访问密钥（向站长索取）"), 1900);
   }
   else {
     S.authenticated = !!S.jwtLocal; S.user = S.authenticated ? (localStorage.getItem("ynai_st_user")||"") : "";
@@ -3399,7 +3530,7 @@ document.addEventListener("DOMContentLoaded", async ()=>{
   $("galClear").onclick = galClearAll;
   $("galAuto").onchange = e=>save(LS.galauto, e.target.checked ? "1" : "0");
   if ($('cfgAkey')) $('cfgAkey').onchange = saveSettings;
-  if ($('cfgAkeySaveBtn')) $('cfgAkeySaveBtn').onclick = () => { saveSettings(); toast('访问密钥已保存 ✦', 'ok'); };
+  if ($('cfgAkeySaveBtn')) $('cfgAkeySaveBtn').onclick = () => saveSettings();
   if ($('promptConvertBtn')) $('promptConvertBtn').onclick = openPromptConvert;
   if ($('promptConvertSubmitBtn')) $('promptConvertSubmitBtn').onclick = convertPrompt;
   if ($('promptApiModels')) $('promptApiModels').onclick = promptApiModels;
@@ -3518,7 +3649,7 @@ function refUiAdd(t){if(REF_STATE[t].length<(t==="vibe"?16:4)){REF_STATE[t].push
 function refUiValidateAndInject(p){if(REF_STATE.vibe.length&&REF_STATE.role.length)throw Error("Vibe 与角色参考不可同时使用");if(REF_STATE.role.length&&!/^nai-diffusion-4-5/.test($("model").value))throw Error("角色参考仅 v4.5 模型可用");const vibes=REF_STATE.vibe.filter(x=>x.b64),roles=REF_STATE.role.filter(x=>x.b64);if(REF_STATE.vibe.length&&!vibes.length)throw Error("请先选择 Vibe 原图");if(REF_STATE.role.length&&roles.length!==REF_STATE.role.length)throw Error("请为每个角色参考选择图片");if(vibes.length){p.reference_image_multiple=vibes.map(x=>x.encoded||x.b64);p.reference_strength_multiple=vibes.map(x=>+x.strength||.7);p.reference_information_extracted_multiple=vibes.map(x=>1);p.normalize_reference_strength_multiple=false;}if(roles.length){p.director_reference_images=roles.map(x=>x.b64);p.director_reference_strength_values=roles.map(x=>Math.max(0,Math.min(1,Number(x.strength)||.6)));p.director_reference_secondary_strength_values=roles.map(x=>Math.max(0,Math.min(1,Number(x.secondaryStrength)||.25)));p.director_reference_information_extracted=roles.map(x=>1);p.director_reference_descriptions=roles.map(x=>({caption:{base_caption:"character",char_captions:[]},legacy_uc:false}));}}
 async function refUiFile(e){const x=REF_STATE[e.target.dataset.refFile][+e.target.dataset.i],file=e.target.files[0];if(!file)return;x.b64=await readFile64(file);x.name=file.name;if(e.target.dataset.refFile==="vibe"){if(!S.cloud){toast("本地模式不能调用云端 Vibe 编码，请切换云端模式后再使用","warn");x.b64=null;refUiRender();return;}try{toast("正在编码 Vibe…");const r=await api("/api/ai/encode-vibe",{method:"POST",body:{image:x.b64,information_extracted:1},responseType:"response",timeoutMs:120000}),blob=await r.blob(),bytes=new Uint8Array(await blob.arrayBuffer());let bin="";for(let i=0;i<bytes.length;i+=0x8000)bin+=String.fromCharCode(...bytes.subarray(i,i+0x8000));x.encoded=btoa(bin);toast("Vibe 编码完成","ok");}catch(err){x.b64=null;toast("Vibe 编码失败："+err.message,"err");}}refUiRender();}
 function imageToolsUiOpen(){$("imageToolsModal")?.classList.add("on");}
-async function imageToolsUiRun(){const f=$("imageToolsFile")?.files[0],action=$("imageToolsAction")?.value;if(action==="suggest-tags"){const prompt=$("prompt")?.value.trim();if(!prompt)return toast("请先填写提示词","warn");try{$("imageToolsOut").textContent=JSON.stringify(await api("/api/ai/generate-image/suggest-tags?"+new URLSearchParams({prompt,model:$("model").value})),null,2);}catch(e){$("imageToolsOut").textContent="工具调用失败："+e.message;}return;}if(!f)return toast("请先选择图片","warn");try{const image=await readFile64(f),path=action==="upscale"?"/api/ai/upscale":"/api/ai/"+(action==="augment"?"augment-image":"annotate-image"),body=action==="upscale"?{image,scale:2}:{image,req_type:action==="augment"?"colorize":"wd-tagger"},r=await api(path,{method:"POST",body,responseType:"response",timeoutMs:180000}),ct=r.headers.get("content-type")||"";let blob=await r.blob();if(ct.includes("json")){const j=JSON.parse(await blob.text());$("imageToolsOut").textContent=JSON.stringify(j,null,2);const x=j.image||j.data?.image||j.images?.[0];if(x)blob=b64ToBlob(String(x).replace(/^data:image\/\w+;base64,/ ,""),"png");}if(blob){$("imageToolsDownload").href=URL.createObjectURL(blob);$("imageToolsDownload").style.display="";$("imageToolsSetBase").style.display="";$("imageToolsSetBase").onclick=()=>{const z=new FileReader();z.onload=()=>S.i2iImg=z.result.split(",")[1];z.readAsDataURL(blob);};}}catch(e){$("imageToolsOut").textContent="工具调用失败："+e.message;}}
+async function imageToolsUiRun(){const f=$("imageToolsFile")?.files[0],action=$("imageToolsAction")?.value;$("imageToolsOut").textContent="处理中…";$("imageToolsDownload").style.display="none";$("imageToolsSetBase").style.display="none";if(action==="suggest-tags"){const prompt=$("prompt")?.value.trim();if(!prompt)return toast("请先填写提示词","warn");try{$("imageToolsOut").textContent=JSON.stringify(await api("/api/ai/generate-image/suggest-tags?"+new URLSearchParams({prompt,model:$("model").value})),null,2);}catch(e){$("imageToolsOut").textContent="工具调用失败："+e.message;}return;}if(!f)return toast("请先选择图片","warn");try{const image=await readFile64(f),path=action==="upscale"?"/api/ai/upscale":"/api/ai/"+(action==="augment"?"augment-image":"annotate-image"),body=action==="upscale"?{image,scale:2}:{image,req_type:action==="augment"?"colorize":"wd-tagger"},r=await api(path,{method:"POST",body,responseType:"response",timeoutMs:180000}),ct=r.headers.get("content-type")||"";let blob=await r.blob();if(ct.includes("json")){const j=JSON.parse(await blob.text());$("imageToolsOut").textContent=JSON.stringify(j,null,2);const x=j.image||j.data?.image||j.images?.[0];if(x)blob=b64ToBlob(String(x).replace(/^data:image\/\w+;base64,/ ,""),"png");}if(blob){if(!ct.includes("json"))$("imageToolsOut").textContent=`完成：${ct||"二进制"} · ${Math.round(blob.size/1024)} KB`;$("imageToolsDownload").href=URL.createObjectURL(blob);$("imageToolsDownload").style.display="";$("imageToolsSetBase").style.display="";$("imageToolsSetBase").onclick=()=>{const z=new FileReader();z.onload=()=>{S.i2iImg=z.result.split(",")[1];$("img2imgPre").src=z.result;$("img2imgPre").style.display="block";$("i2iStrengthWrap").style.display="";$("i2iDrop").textContent="已选底图：图片工具结果（点击更换）";$("i2iClear").style.display="";toast("已设为图生图底图（高级里可清除）","ok");};z.readAsDataURL(blob);};}}catch(e){$("imageToolsOut").textContent="工具调用失败："+e.message;}}
 
 </script>
 </body>
