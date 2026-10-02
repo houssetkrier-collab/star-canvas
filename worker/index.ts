@@ -3,6 +3,10 @@ export interface Env {
   ASSETS: Fetcher;
   R2: R2Bucket;
   YESNAI_BASE: string;
+  // 出口节点池：逗号分隔多节点 URL；配置后按「账号 id % 节点数」为每账号固定一个出口节点（见 pool/README.md）
+  YESNAI_BASES?: string;
+  // 池节点鉴权密钥（wrangler secret put UPSTREAM_POOL_KEY）；仅发往池节点的请求携带
+  UPSTREAM_POOL_KEY?: string;
   YESNAI_JWT: string;
   YESNAI_API_TOKEN?: string;
   APP_ORIGIN?: string;
@@ -66,11 +70,28 @@ async function readJson<T>(request: Request): Promise<T> {
 function validTimezone(tz: string) {
   try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return true; } catch { return false; }
 }
-function upstreamBase(env: Env) { return (env.YESNAI_BASE || "https://nai.rinko.ai").replace(/\/$/, ""); }
-async function yesnaiFetch(env: Env, path: string, init: RequestInit = {}, timeoutMs = UPSTREAM_TIMEOUT_MS) {
+function upstreamPool(env: Env): string[] {
+  const raw = String(env.YESNAI_BASES || env.YESNAI_BASE || "https://nai.rinko.ai");
+  const list = raw.split(",").map(s => s.trim().replace(/\/+$/, "")).filter(Boolean);
+  return list.length ? list : ["https://nai.rinko.ai"];
+}
+// sticky：账号 id 取模定节点，id 不变则出口不变；无账号上下文走首节点
+function upstreamBase(env: Env, acc?: { id?: number | null } | null): string {
+  const pool = upstreamPool(env);
+  if (acc?.id == null) return pool[0];
+  return pool[Number(acc.id) % pool.length];
+}
+// 仅直连默认 YESNAI_BASE 的请求不带池密钥，避免把密钥发给非自有节点
+function poolKeyHeaders(env: Env, base: string): Record<string, string> {
+  if (!env.UPSTREAM_POOL_KEY) return {};
+  const direct = (env.YESNAI_BASE || "https://nai.rinko.ai").replace(/\/+$/, "");
+  return base === direct ? {} : { "X-Pool-Key": env.UPSTREAM_POOL_KEY };
+}
+async function yesnaiFetch(env: Env, path: string, init: RequestInit = {}, timeoutMs = UPSTREAM_TIMEOUT_MS, acc: { id?: number | null } | null = null) {
   // Headers 实例没有可枚举的自有属性，对象展开会得到空对象导致 Authorization 丢失（网关 401 根因），先归一为普通对象
   const extra = init.headers instanceof Headers ? Object.fromEntries(init.headers.entries()) : (init.headers || {});
-  return fetch(upstreamBase(env) + path, { ...init, signal: AbortSignal.timeout(timeoutMs), headers: { Accept: "application/json", ...extra } });
+  const base = upstreamBase(env, acc);
+  return fetch(base + path, { ...init, signal: AbortSignal.timeout(timeoutMs), headers: { Accept: "application/json", ...poolKeyHeaders(env, base), ...extra } });
 }
 async function upstreamJson(response: Response) {
   const text = await response.text();
@@ -207,8 +228,8 @@ async function resolveAccount(env: Env, request: Request): Promise<AccountRow> {
   if (!active) throw new HttpError("没有可用账号——请在设置里添加 YesNAI 账号", 500, "NO_ACCOUNT");
   return active;
 }
-async function upstreamLogin(env: Env, username: string, password: string) {
-  const resp = await yesnaiFetch(env, "/api/ynai/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
+async function upstreamLogin(env: Env, username: string, password: string, acc: { id?: number | null } | null = null) {
+  const resp = await yesnaiFetch(env, "/api/ynai/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) }, UPSTREAM_TIMEOUT_MS, acc);
   const { data } = await upstreamJson(resp);
   // 上游登录响应存在两种形状：{access_token} 或 {message,data:{access_token}}（线上实测为后者），读法两者兼容
   const jwt = data?.data?.access_token ?? data?.access_token;
@@ -224,7 +245,7 @@ async function accountJwt(env: Env, acc: AccountRow): Promise<string> {
 async function refreshJwt(env: Env, acc: AccountRow): Promise<string | null> {
   const password = await unseal(env, acc.password_enc);
   if (!password) return null;
-  const { jwt } = await upstreamLogin(env, acc.username, password);
+  const { jwt } = await upstreamLogin(env, acc.username, password, acc);
   await env.DB.prepare("UPDATE accounts SET jwt_enc=?,updated_at=? WHERE id=?").bind(await seal(env, jwt), nowIso(), acc.id).run();
   return jwt;
 }
@@ -237,7 +258,7 @@ async function updateAccount(env: Env, id: number, patch: Record<string, unknown
   await env.DB.prepare(`UPDATE accounts SET ${sets.join(",")} WHERE id=?`).bind(...vals).run();
 }
 async function fetchBalance(env: Env, acc: AccountRow): Promise<number> {
-  const resp = await yesnaiFetch(env, "/api/ynai/user/balance", { headers: { Authorization: `Bearer ${await accountJwt(env, acc)}` } });
+  const resp = await yesnaiFetch(env, "/api/ynai/user/balance", { headers: { Authorization: `Bearer ${await accountJwt(env, acc)}` } }, UPSTREAM_TIMEOUT_MS, acc);
   const { data } = await upstreamJson(resp);
   const gems = Number(data?.data?.balance_gems);
   if (resp.ok && !Number.isNaN(gems)) { await updateAccount(env, acc.id, { gems_last: gems }); return gems; }
@@ -251,7 +272,7 @@ async function provisionToken(env: Env, acc: AccountRow): Promise<string> {
       method: "POST",
       headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
       body: JSON.stringify({ name, allowed_models: [], daily_gems_limit: null, total_gems_limit: null, max_gems_per_request: null, allow_paid_requests: true, allow_free_tier_requests: true }),
-    });
+    }, UPSTREAM_TIMEOUT_MS, acc);
     const { data } = await upstreamJson(resp);
     if (resp.ok && data?.data?.token) return String(data.data.token);
     throw new HttpError(sanitizedMessage(data, `创建 Token 失败（HTTP ${resp.status}）`), 502, "TOKEN_PROVISION_FAILED");
@@ -372,12 +393,12 @@ async function performCheckin(env: Env, acc: AccountRow, slot: string | null, op
   const actualSlot = slot || dueSlot(effectiveDayTimes(config, acc), acc);
   if (!actualSlot) return { ok: false, skipped: true, message: "当前没有到点的签到时间" };
   let jwt = await accountJwt(env, acc);
-  let response = await yesnaiFetch(env, "/api/user/checkin", { method: "POST", headers: { Authorization: `Bearer ${jwt}` } });
+  let response = await yesnaiFetch(env, "/api/user/checkin", { method: "POST", headers: { Authorization: `Bearer ${jwt}` } }, UPSTREAM_TIMEOUT_MS, acc);
   if (response.status === 401) {
     const reJwt = await refreshJwt(env, acc).catch(() => null); // 401 时尝试用托管密码重登一次
     if (reJwt) {
       jwt = reJwt;
-      response = await yesnaiFetch(env, "/api/user/checkin", { method: "POST", headers: { Authorization: `Bearer ${jwt}` } });
+      response = await yesnaiFetch(env, "/api/user/checkin", { method: "POST", headers: { Authorization: `Bearer ${jwt}` } }, UPSTREAM_TIMEOUT_MS, acc);
     }
   }
   const { data } = await upstreamJson(response);
@@ -417,7 +438,7 @@ async function autoBuyPacks(env: Env, acc: AccountRow) {
   // 重新读账号行：签到流程可能刚用托管密码重登并刷新过 JWT，取落库后的最新值
   const fresh = (await getAccount(env, acc.id)) || acc;
   const jwt = await accountJwt(env, fresh);
-  const info = await upstreamJson(await yesnaiFetch(env, "/api/ynai/image-packs", { headers: { Authorization: `Bearer ${jwt}` } }));
+  const info = await upstreamJson(await yesnaiFetch(env, "/api/ynai/image-packs", { headers: { Authorization: `Bearer ${jwt}` } }, UPSTREAM_TIMEOUT_MS, acc));
   const pack = unwrapEnvelope(info.data);
   const credits = Number(pack?.image_pack_credits), gems = Number(pack?.balance_gems), packGems = Number(pack?.pack_gems);
   if (!info.response.ok || !Number.isFinite(credits) || !Number.isFinite(packGems)) {
@@ -432,7 +453,7 @@ async function autoBuyPacks(env: Env, acc: AccountRow) {
   }
   const buy = await upstreamJson(await yesnaiFetch(env, "/api/ynai/image-packs/purchase", {
     method: "POST", headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" }, body: JSON.stringify({ packs: 1 }),
-  }));
+  }, UPSTREAM_TIMEOUT_MS, acc));
   if (buy.response.ok) await log(true, buy.response.status, `图包次数 ${credits} 低于阈值 ${threshold}，已自动购买 1 个图包（每包 ${packGems} Gems）`);
   else await log(false, buy.response.status, `自动购买图包失败（HTTP ${buy.response.status}）：${sanitizedMessage(buy.data, "上游错误")}`);
 }
@@ -487,11 +508,11 @@ async function yesnaiRoute(request: Request, env: Env, route: string) {
     const apiToken = await unseal(env, acc.api_token_enc);
     if (!apiToken) throw new HttpError(`账号「${accountPublic(acc).label}」未配置生图 API Token（设置里可补填）`, 500, "ACCOUNT_NO_TOKEN");
     const body = normalizeNaiBody(await readJson<any>(request));
-    return forward(await yesnaiFetch(env, "/v1/nai/generate-image", { method: "POST", headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }, UPSTREAM_TIMEOUT_GENERATE_MS));
+    return forward(await yesnaiFetch(env, "/v1/nai/generate-image", { method: "POST", headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }, UPSTREAM_TIMEOUT_GENERATE_MS, acc));
   }
-  if (route === "quote") { requireOrigin(request, env); const body = await readJson<any>(request); return forward(await yesnaiFetch(env, "/api/ynai/playground/quote", { method: "POST", headers: { Authorization: `Bearer ${await accountJwt(env, acc)}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }, UPSTREAM_TIMEOUT_QUOTE_MS)); }
-  if (route === "balance") return forward(await yesnaiFetch(env, "/api/ynai/user/balance", { headers: { Authorization: `Bearer ${await accountJwt(env, acc)}` } }));
-  if (route === "checkin") { requireOrigin(request, env); return forward(await yesnaiFetch(env, "/api/user/checkin", { method: "POST", headers: { Authorization: `Bearer ${await accountJwt(env, acc)}` } })); }
+  if (route === "quote") { requireOrigin(request, env); const body = await readJson<any>(request); return forward(await yesnaiFetch(env, "/api/ynai/playground/quote", { method: "POST", headers: { Authorization: `Bearer ${await accountJwt(env, acc)}`, "Content-Type": "application/json" }, body: JSON.stringify(body) }, UPSTREAM_TIMEOUT_QUOTE_MS, acc)); }
+  if (route === "balance") return forward(await yesnaiFetch(env, "/api/ynai/user/balance", { headers: { Authorization: `Bearer ${await accountJwt(env, acc)}` } }, UPSTREAM_TIMEOUT_MS, acc));
+  if (route === "checkin") { requireOrigin(request, env); return forward(await yesnaiFetch(env, "/api/user/checkin", { method: "POST", headers: { Authorization: `Bearer ${await accountJwt(env, acc)}` } }, UPSTREAM_TIMEOUT_MS, acc)); }
   // 图片工具代理：复用账号选择，透传上游二进制及表示头。
   if (route.startsWith("ai/")) return imageToolRoute(request, env, route.slice(3));
   throw new HttpError("未知 YesNAI 路由", 404, "ROUTE_NOT_FOUND");
@@ -511,6 +532,7 @@ async function upstreamRelay(request: Request, env: Env) {
   const method = payload.method;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const auth = payload?.auth;
+  let relayAcc: AccountRow | null = null;
   if (typeof auth === "string" && auth) {
     headers.Authorization = "Bearer " + auth.replace(/^Bearer\s+/i, "");
   } else {
@@ -518,10 +540,10 @@ async function upstreamRelay(request: Request, env: Env) {
     // 找不到账号或缺托管密码直接拒绝；上游登录失败（含 401）由 upstreamLogin 按上游状态码抛出透传。
     const accountId = Number(String(request.headers.get("X-Account-Id") || "").trim());
     if (accountId) {
-      const acc = await getAccount(env, accountId);
-      const password = acc ? await unseal(env, acc.password_enc) : "";
-      if (!acc || !password) throw new HttpError("该账号缺少用户名密码，无法代登录", 400, "ACCOUNT_CREDENTIALS_MISSING");
-      const { jwt } = await upstreamLogin(env, acc.username, password);
+      relayAcc = await getAccount(env, accountId);
+      const password = relayAcc ? await unseal(env, relayAcc.password_enc) : "";
+      if (!relayAcc || !password) throw new HttpError("该账号缺少用户名密码，无法代登录", 400, "ACCOUNT_CREDENTIALS_MISSING");
+      const { jwt } = await upstreamLogin(env, relayAcc.username, password, relayAcc);
       headers.Authorization = "Bearer " + jwt;
     }
   }
@@ -532,7 +554,7 @@ async function upstreamRelay(request: Request, env: Env) {
     init.body = serialized;
   }
   let resp: Response;
-  try { resp = await yesnaiFetch(env, clean, init, 30000); }
+  try { resp = await yesnaiFetch(env, clean, init, 30000, relayAcc); }
   catch (e: any) { throw new HttpError("上游站点不可达：" + sanitizedMessage(e, String(e)), 502, "UPSTREAM_UNAVAILABLE"); }
   const text = await resp.text();
   return new Response(text, { status: resp.status, headers: { "Content-Type": resp.headers.get("Content-Type") || "application/json; charset=utf-8", "Cache-Control": "no-store" } });
@@ -549,8 +571,10 @@ async function imageToolRoute(request: Request, env: Env, route: string) {
   const headers = new Headers(request.headers);
   for (const h of ["authorization", "host", "content-length", "connection", "transfer-encoding"]) headers.delete(h);
   headers.set("Authorization", `Bearer ${token}`);
+  const toolBase = upstreamBase(env, acc);
+  for (const [poolName, poolValue] of Object.entries(poolKeyHeaders(env, toolBase))) headers.set(poolName, poolValue);
   // Request bodies are single-use streams; clone before consuming/forwarding and preserve tool query parameters.
-  const target = new URL(upstreamBase(env) + upstreamPath);
+  const target = new URL(toolBase + upstreamPath);
   target.search = new URL(request.url).search;
   const resp = await fetch(target.toString(), { method: request.method, headers, body: ["GET", "HEAD"].includes(request.method) ? undefined : await request.clone().arrayBuffer(), signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_GENERATE_MS) });
   return forward(resp);
@@ -668,7 +692,7 @@ async function accountsRoute(request: Request, env: Env, rest: string) {
       }
     }
     if (body?.password) { // 更新托管密码并立即重登刷新 JWT
-      const { jwt } = await upstreamLogin(env, acc.username, String(body.password));
+      const { jwt } = await upstreamLogin(env, acc.username, String(body.password), acc);
       patch.password_enc = await seal(env, String(body.password));
       patch.jwt_enc = await seal(env, jwt);
     }
@@ -999,7 +1023,7 @@ async function gatewayGenerate(request: Request, env: Env, upstreamPath: string)
       let retried401 = false, attemptNo = 0;
       while (true) {
         attemptNo++; attemptNoTotal++;
-        try { response = await yesnaiFetch(env, upstreamPath, { method: "POST", headers: gatewayRequestHeaders(request, token), body: mode === "passthrough" ? rawBody.slice(0) : forwardedBody.slice(0) }, UPSTREAM_TIMEOUT_GENERATE_MS); }
+        try { response = await yesnaiFetch(env, upstreamPath, { method: "POST", headers: gatewayRequestHeaders(request, token), body: mode === "passthrough" ? rawBody.slice(0) : forwardedBody.slice(0) }, UPSTREAM_TIMEOUT_GENERATE_MS, acc); }
         catch (e: any) { lastMessage = String(e?.message || e); await env.DB.prepare("INSERT INTO request_attempts(request_id,gateway_key_id,account_id,attempt_no,error,created_at) VALUES(?,?,?,?,?,?)").bind(requestId, key.id, acc.id, attemptNo, lastMessage.slice(0, 300), nowIso()).run().catch(() => {}); break; }
         await env.DB.prepare("INSERT INTO request_attempts(request_id,gateway_key_id,account_id,attempt_no,status_code,created_at) VALUES(?,?,?,?,?,?)").bind(requestId, key.id, acc.id, attemptNo, response.status, nowIso()).run().catch(() => {});
         if (response.status === 401 && !retried401) { const fresh = await refreshJwt(env, acc).catch(() => null); if (fresh) { const rebuilt = await provisionToken(env, acc).catch(() => null); if (rebuilt) { token = rebuilt; await updateAccount(env, acc.id, { api_token_enc: await seal(env, rebuilt) }); retried401 = true; continue; } } }
@@ -1080,7 +1104,7 @@ async function generateViaPool(env: Env, naiBody: any): Promise<{ resp: Response
     if (!token) continue;
     attempted++;
     const timeoutMs = Math.min(UPSTREAM_TIMEOUT_GENERATE_MS, remaining);
-    const resp = await yesnaiFetch(env, "/v1/nai/generate-image", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(naiBody) }, timeoutMs);
+    const resp = await yesnaiFetch(env, "/v1/nai/generate-image", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(naiBody) }, timeoutMs, acc);
     if (resp.ok) return { resp, account: accountPublic(acc).label };
     // 余额不足 / 限流 / Token 失效 / 上游 5xx：换下一个候选重试
     if ([401, 402, 429].includes(resp.status) || resp.status >= 500) {

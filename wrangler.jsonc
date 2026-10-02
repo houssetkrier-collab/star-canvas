@@ -22,6 +22,9 @@
   },
   "vars": {
     "YESNAI_BASE": "https://nai.rinko.ai"
+    // 启用出口节点池（按账号固定出口 IP，见 pool/README.md）：部署节点后取消注释。
+    // "YESNAI_BASES": "https://节点A.deno.dev,https://节点B.vercel.app"
+    // 池密钥不入此文件：npx wrangler secret put UPSTREAM_POOL_KEY
   },
   "r2_buckets": [
     {
