@@ -552,15 +552,17 @@ class Handler(BaseHTTPRequestHandler):
                     st["weekend_times"] = clean_times(payload["weekend_times"], st["weekend_times"])
                 for k in ("base", "token"):
                     if k in payload:
-                        # base 白名单：签到地址只允许默认上游站，防止被改成攻击者服务器后带走 JWT
+                        # base 白名单：签到地址只允许代理白名单内的站点（默认 *.rinko.ai，外加 --allow-host），
+                        # 防止被改成攻击者服务器后带走 JWT；用 --site 指定其他上游时也能正常同步令牌
                         if k == "base":
                             b = str(payload.get("base") or "").rstrip("/")
-                            if b and b != DEFAULT_SITE.rstrip("/"):
+                            if b and not allowed(b, ALLOW_HOSTS):
                                 self._send(400, "application/json; charset=utf-8",
-                                           json.dumps({"error": {"message": f"base 仅允许默认上游站点 {DEFAULT_SITE}",
+                                           json.dumps({"error": {"message": f"base 不在代理白名单内：{b}",
                                                                  "code": "BASE_NOT_ALLOWED"}},
                                                       ensure_ascii=False).encode())
                                 return
+                            payload["base"] = b
                         st[k] = payload[k]
                 test = None
                 if payload.get("action") == "test":
